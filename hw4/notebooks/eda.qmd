@@ -607,11 +607,13 @@ print(f"test:  {test_start.date()} .. {test_end.date()}  "
 - Локальные модели не оправдывают вычисления при таком уровне intermittency.
 - Recursive multi-step forecasting на горизонт 4 недели.
 
-Метрики:
+Метрики (по стандарту соревнования M5 Accuracy):
 
-- WAPE как главная, устойчива к нулям.
-- Bias = mean(forecast - actual) / mean(actual) для контроля систематического над/недопрогноза.
-- WAPE отдельно по категориям (FOODS / HOBBIES / HOUSEHOLD) и по штатам для контроля провалов.
+- **WRMSSE** как главная: взвешенный RMSSE на 12 уровнях иерархии M5, веса по revenue share последних 28 дней.
+- **RMSSE** per-series для разбора фейлов без weighting.
+- **MASE** как дополнительная, scaled error без квадратов (robust к выбросам и нулям).
+- **Bias** = mean(forecast - actual) / mean(actual) для контроля систематического над/недопрогноза.
+- Все метрики разрезаются по `cat_id` × `state_id` для error analysis.
 
 Валидация:
 
