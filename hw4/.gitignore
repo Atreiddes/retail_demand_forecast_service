@@ -1,0 +1,21 @@
+# raw and processed datasets are large, не коммитим
+data/raw/
+data/processed/
+
+# jupyter
+.ipynb_checkpoints/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# quarto
+_output/
+_freeze/
+.quarto/
+*_files/
+
+/.quarto/
+**/*.quarto_ipynb

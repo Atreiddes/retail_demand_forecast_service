@@ -1,0 +1,620 @@
+---
+title: "M5 weekly demand: EDA"
+subtitle: "Hierarchical retail demand, 30 490 рядов × 278 недель"
+author: "Dmitrii Gertsovskii"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+    fig-width: 10
+    fig-height: 5
+    fig-format: png
+    df-print: paged
+execute:
+  warning: false
+  cache: false
+jupyter: python3
+---
+
+# 0. Контекст и постановка
+
+Прогноз недельного спроса на уровне SKU × магазин для FMCG. Датасет M5 Forecasting: Accuracy (Walmart × University of Nicosia, Kaggle 2020), 30 490 временных рядов, ~280 недель.
+
+Цели EDA:
+
+1. Понять структуру и качество данных.
+2. Выявить паттерны для модели: сезонность, промо, события, OOS.
+3. Определить алгоритм формирования выборки и стратегию валидации.
+4. Зафиксировать список фич и предобработок.
+
+```{python}
+#| label: setup
+#| code-fold: true
+from pathlib import Path
+import sys
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from statsmodels.tsa.stattools import acf
+
+ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+PROCESSED = ROOT / "data" / "processed"
+sys.path.insert(0, str(ROOT / "scripts"))
+from schemas import sales_weekly_schema
+
+sns.set_theme(style="whitegrid", palette="colorblind", rc={"figure.dpi": 110})
+plt.rcParams["axes.titleweight"] = "semibold"
+pd.set_option("display.max_columns", 60)
+pd.set_option("display.float_format", "{:,.2f}".format)
+```
+
+```{python}
+#| label: load
+weekly = pd.read_parquet(PROCESSED / "sales_weekly.parquet")
+calendar = pd.read_parquet(PROCESSED / "calendar.parquet")
+prices = pd.read_parquet(PROCESSED / "prices.parquet")
+
+sales_weekly_schema.validate(weekly.sample(50_000, random_state=42), lazy=True)
+print(f"weekly:   {weekly.shape[0]:>10,} rows × {weekly.shape[1]} cols, "
+      f"{weekly.memory_usage(deep=True).sum()/1e6:.0f} MB in RAM")
+print(f"calendar: {calendar.shape[0]:>10,} rows × {calendar.shape[1]} cols")
+print(f"prices:   {prices.shape[0]:>10,} rows × {prices.shape[1]} cols")
+```
+
+# 1. Структура датасета
+
+```{python}
+#| label: structure
+full = weekly[weekly["n_days"] == 7].copy()
+
+dims = pd.DataFrame({
+    "сущность": ["item_id", "store_id", "state_id", "cat_id", "dept_id",
+                  "id (item×store)", "wm_yr_wk", "период"],
+    "кол-во": [
+        full["item_id"].nunique(),
+        full["store_id"].nunique(),
+        full["state_id"].nunique(),
+        full["cat_id"].nunique(),
+        full["dept_id"].nunique(),
+        full["id"].nunique(),
+        full["wm_yr_wk"].nunique(),
+        f"{full['week_start_date'].min().date()} .. {full['week_start_date'].max().date()}",
+    ],
+})
+dims
+```
+
+```{python}
+#| label: hierarchy
+#| fig-cap: "Иерархия state -> store -> category. Высота столбца это суммарные units."
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+s = full.groupby(["state_id", "store_id"], observed=True)["units"].sum().reset_index()
+sns.barplot(data=s.sort_values("units", ascending=False),
+            x="store_id", y="units", hue="state_id", ax=axes[0])
+axes[0].set_title("Магазины по штатам, суммарные units")
+axes[0].set_ylabel("units, всего")
+axes[0].set_xlabel("")
+axes[0].tick_params(axis="x", rotation=45)
+axes[0].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.1f}M"))
+
+c = full.groupby(["cat_id", "dept_id"], observed=True)["units"].sum().reset_index()
+sns.barplot(data=c.sort_values("units", ascending=False),
+            x="dept_id", y="units", hue="cat_id", ax=axes[1])
+axes[1].set_title("Департаменты по категориям")
+axes[1].set_ylabel("")
+axes[1].set_xlabel("")
+axes[1].tick_params(axis="x", rotation=45)
+axes[1].yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e6:.1f}M"))
+plt.tight_layout()
+plt.show()
+```
+
+Иерархия для агрегации прогнозов: `state -> store -> category -> department -> item -> id`. Это 6 уровней, на которых планнер смотрит результаты (top-down reconciliation возможна).
+
+# 2. Качество данных
+
+```{python}
+#| label: quality
+quality = pd.DataFrame({
+    "метрика": [
+        "строк всего",
+        "уникальных рядов",
+        "строк с n_days < 7 (неполная неделя)",
+        "строк без sell_price (SKU не в продаже)",
+        "строк с units == 0",
+        "строк с units == 0 и available_days > 0 (валидный 0)",
+        "строк с available_days == 0 (полный OOS период)",
+    ],
+    "значение": [
+        len(weekly),
+        weekly["id"].nunique(),
+        (weekly["n_days"] < 7).sum(),
+        weekly["sell_price"].isna().sum(),
+        (weekly["units"] == 0).sum(),
+        ((weekly["units"] == 0) & (weekly["available_days"] > 0)).sum(),
+        (weekly["available_days"] == 0).sum(),
+    ],
+})
+quality["доля"] = quality["значение"].apply(
+    lambda v: f"{v/len(weekly):.2%}" if isinstance(v, (int, np.integer)) else ""
+)
+quality
+```
+
+OOS как разметочный шум. 20.8% строк имеют `available_days == 0` (нет цены вообще, SKU не запущен либо снят с полки). Эти нули не отражают спрос. Дополнительно ~19% строк имеют `units == 0` при наличии цены: это валидные нулевые недели для низкооборачиваемых SKU.
+
+```{python}
+#| label: oos-by-time
+#| fig-cap: "Доля рядов с available_days==0 по неделям."
+oos = (full.assign(oos=(full["available_days"] == 0).astype("int8"))
+            .groupby("week_start_date")["oos"].mean())
+fig, ax = plt.subplots(figsize=(11, 3.2))
+ax.plot(oos.index, oos.values, lw=1.2)
+ax.fill_between(oos.index, oos.values, alpha=0.15)
+ax.set_ylabel("доля рядов без цены")
+ax.set_xlabel("")
+ax.set_title("Доля OOS рядов по времени")
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:.0%}"))
+plt.tight_layout()
+plt.show()
+```
+
+Доля OOS падает со временем по мере того, как новые SKU входят в каталог и в магазины.
+
+# 3. Распределение target (units)
+
+```{python}
+#| label: target-stats
+clean = full[full["available_days"] > 0].copy()
+
+stats = clean["units"].describe(percentiles=[.5, .75, .9, .95, .99, .999]).round(2)
+print(stats.to_string())
+print(f"\nдоля units == 0:     {(clean['units']==0).mean():.2%}")
+print(f"доля units <= 5:     {(clean['units']<=5).mean():.2%}")
+print(f"доля units > p99:    {(clean['units']>stats['99%']).mean():.2%}")
+```
+
+```{python}
+#| label: target-distribution
+#| fig-cap: "Распределение units, линейная шкала (clip 0-100) и log1p."
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].hist(clean["units"].clip(0, 100), bins=60, color=sns.color_palette()[0])
+axes[0].set_title("units (clip 0-100)")
+axes[0].set_xlabel("units / неделя")
+axes[0].set_ylabel("частота")
+
+axes[1].hist(np.log1p(clean["units"]), bins=60, color=sns.color_palette()[1])
+axes[1].set_title("log1p(units)")
+axes[1].set_xlabel("log1p(units)")
+plt.tight_layout()
+plt.show()
+```
+
+Распределение тяжелохвостое, mean (8.0) не равен median (2.0). Варианты для модели:
+
+1. Target в `log1p` при обучении (+5-10% к WAPE на M5 в типовых решениях).
+2. Tweedie loss (compound Poisson-Gamma) для нулевых дискретных значений с тяжёлым хвостом.
+3. Quantile regression при необходимости интервалов.
+
+# 4. Временные паттерны
+
+```{python}
+#| label: weekly-total
+#| fig-cap: "Total weekly units и 13-week rolling mean."
+total = full.groupby("week_start_date")["units"].sum()
+roll = total.rolling(13, center=True, min_periods=4).mean()
+
+fig, ax = plt.subplots(figsize=(11, 3.5))
+ax.plot(total.index, total.values, lw=0.8, alpha=0.5, label="неделя")
+ax.plot(roll.index, roll.values, lw=2.2, color="C3", label="rolling mean (13w)")
+ax.set_ylabel("units, всего")
+ax.set_title("Суммарные units по неделям")
+ax.legend()
+ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x/1e3:.0f}K"))
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: yoy-trend
+yoy = (full.assign(year=full["week_start_date"].dt.year)
+            .groupby("year")
+            .agg(units=("units", "sum"), revenue=("revenue", "sum"),
+                 n_weeks=("wm_yr_wk", "nunique")))
+yoy["units_per_week"] = (yoy["units"] / yoy["n_weeks"]).round(0)
+yoy["revenue_per_week"] = (yoy["revenue"] / yoy["n_weeks"]).round(0)
+yoy["yoy_units"] = yoy["units_per_week"].pct_change().mul(100).round(1)
+yoy
+```
+
+```{python}
+#| label: seasonality
+#| fig-cap: "Сезонность: неделя года (слева), месяц (справа). Виден пик февраля (Super Bowl, wk6), провал wk53 (рождественская неделя), повышенный март-апрель."
+season = full.assign(
+    wk_in_year=full["week_start_date"].dt.isocalendar().week,
+    month=full["week_start_date"].dt.month,
+)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+sns.boxplot(data=season, x="wk_in_year", y="units",
+            showfliers=False, color=sns.color_palette()[0], ax=axes[0])
+axes[0].set_title("Распределение units по неделе года")
+axes[0].set_xlabel("неделя ISO года")
+axes[0].set_xticks(range(0, 53, 4))
+axes[0].set_xticklabels(range(1, 54, 4))
+
+sns.boxplot(data=season, x="month", y="units",
+            showfliers=False, color=sns.color_palette()[2], ax=axes[1])
+axes[1].set_title("Распределение units по месяцу")
+axes[1].set_xlabel("месяц")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: acf
+#| fig-cap: "ACF суммарного weekly demand, 60 лагов. Виден годовой цикл (lag 52) и плавное затухание."
+acf_vals = acf(total.values, nlags=60, fft=True)
+
+fig, ax = plt.subplots(figsize=(11, 3))
+ax.stem(range(len(acf_vals)), acf_vals, basefmt=" ")
+ax.axhline(0, color="black", lw=0.5)
+for lag in (4, 13, 26, 52):
+    ax.axvline(lag, color="C3", ls="--", alpha=0.3)
+    ax.text(lag, 0.95, f"lag {lag}", color="C3", fontsize=8, ha="center")
+ax.set_xlabel("lag, недели")
+ax.set_ylabel("ACF")
+ax.set_title("Автокорреляция total demand")
+plt.tight_layout()
+plt.show()
+```
+
+# 5. Иерархическая декомпозиция
+
+```{python}
+#| label: breakdown
+agg = (full.groupby(["cat_id", "state_id"], observed=True)
+            .agg(units=("units", "sum"), revenue=("revenue", "sum"))
+            .reset_index())
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+pivot_u = agg.pivot(index="cat_id", columns="state_id", values="units")
+sns.heatmap(pivot_u / 1e6, annot=True, fmt=".1f", cmap="rocket_r",
+            cbar_kws={"label": "units, M"}, ax=axes[0])
+axes[0].set_title("Units по категории × штат, M")
+
+pivot_r = agg.pivot(index="cat_id", columns="state_id", values="revenue")
+sns.heatmap(pivot_r / 1e6, annot=True, fmt=".1f", cmap="mako_r",
+            cbar_kws={"label": "revenue, M$"}, ax=axes[1])
+axes[1].set_title("Revenue по категории × штат, M$")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: cat-share
+share = (full.groupby("cat_id", observed=True)
+              .agg(units=("units", "sum"), revenue=("revenue", "sum")))
+share["units_share"] = (share["units"] / share["units"].sum() * 100).round(1)
+share["revenue_share"] = (share["revenue"] / share["revenue"].sum() * 100).round(1)
+share["avg_price"] = (share["revenue"] / share["units"]).round(2)
+share
+```
+
+# 6. Длинный хвост по SKU
+
+```{python}
+#| label: pareto
+#| fig-cap: "Lorenz curve: какая доля SKU даёт какую долю units."
+item_units = full.groupby("item_id", observed=True)["units"].sum().sort_values(ascending=False)
+id_units = full.groupby("id", observed=True)["units"].sum().sort_values(ascending=False)
+
+def pareto(s):
+    cum = s.cumsum() / s.sum()
+    return np.arange(1, len(s) + 1) / len(s), cum.values
+
+x1, y1 = pareto(item_units)
+x2, y2 = pareto(id_units)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+ax.plot(x1 * 100, y1 * 100, lw=2, label=f"артикулы (n={len(item_units):,})")
+ax.plot(x2 * 100, y2 * 100, lw=2, label=f"ряды item×store (n={len(id_units):,})")
+ax.plot([0, 100], [0, 100], "k--", lw=0.7, label="равномерное")
+for thresh in (50, 80, 90):
+    n_items = (item_units.cumsum() / item_units.sum() < thresh / 100).sum() + 1
+    n_ids = (id_units.cumsum() / id_units.sum() < thresh / 100).sum() + 1
+    ax.annotate(f"{thresh}%: {n_items} артикулов / {n_ids} рядов",
+                xy=(n_items / len(item_units) * 100, thresh),
+                xytext=(15, -10), textcoords="offset points",
+                fontsize=9, color="C3")
+ax.set_xlabel("доля сущностей, %")
+ax.set_ylabel("кумулятивная доля units, %")
+ax.set_title("Концентрация спроса (Lorenz curve)")
+ax.legend(loc="lower right")
+plt.tight_layout()
+plt.show()
+```
+
+Концентрация умеренная: 80% units дают 34% артикулов и 30% рядов item×store. Для FMCG это типичная картина, менее острый Парето по сравнению с модой и электроникой. Все SKU должны попадать в обучение, фокус на head не оправдан.
+
+# 7. Intermittency analysis (Croston / Syntetos)
+
+Классификация рядов по `ADI` (average inter-demand interval) и `CV²` (squared coefficient of variation of nonzero demand). Границы по Syntetos & Boylan (2005): ADI=1.32, CV²=0.49.
+
+```{python}
+#| label: croston
+def classify(series: pd.Series) -> dict:
+    s = series.values
+    nz = s[s > 0]
+    if len(nz) < 2:
+        return {"adi": np.nan, "cv2": np.nan, "class": "no_demand"}
+    adi = len(s) / len(nz)
+    cv2 = (nz.std() / nz.mean()) ** 2
+    if adi < 1.32 and cv2 < 0.49:
+        cls = "smooth"
+    elif adi >= 1.32 and cv2 < 0.49:
+        cls = "intermittent"
+    elif adi < 1.32 and cv2 >= 0.49:
+        cls = "erratic"
+    else:
+        cls = "lumpy"
+    return {"adi": adi, "cv2": cv2, "class": cls}
+
+sample_ids = full["id"].drop_duplicates().sample(3000, random_state=42).tolist()
+sub = full[full["id"].isin(sample_ids)]
+clf = (sub.groupby("id", observed=True)["units"]
+           .apply(lambda s: pd.Series(classify(s)))
+           .unstack())
+clf["class"].value_counts(normalize=True).mul(100).round(1)
+```
+
+```{python}
+#| label: croston-plot
+#| fig-cap: "ADI × CV² scatter, sample 3 000 рядов, цвет это категория Syntetos."
+fig, ax = plt.subplots(figsize=(9, 6))
+palette = {"smooth": "#4c72b0", "intermittent": "#dd8452",
+           "erratic": "#55a467", "lumpy": "#c44e52", "no_demand": "#999999"}
+for cls, color in palette.items():
+    sub_clf = clf[clf["class"] == cls]
+    if len(sub_clf) == 0:
+        continue
+    ax.scatter(sub_clf["adi"], sub_clf["cv2"], s=8, alpha=0.5,
+               color=color, label=f"{cls} ({len(sub_clf)})")
+ax.axvline(1.32, color="k", ls="--", lw=0.8)
+ax.axhline(0.49, color="k", ls="--", lw=0.8)
+ax.set_xscale("log")
+ax.set_yscale("log")
+ax.set_xlabel("ADI (average inter-demand interval)")
+ax.set_ylabel("CV² (squared coefficient of variation)")
+ax.set_title("Классификация Syntetos & Boylan")
+ax.legend(loc="upper right")
+plt.tight_layout()
+plt.show()
+```
+
+Доминирующие классы: `lumpy` и `intermittent`. На них классический ETS/ARIMA проигрывает Croston-семейству (Croston, SBA, TSB) и градиентному бустингу на лагах. Это и объясняет почему M5 SOTA это LightGBM с lag/rolling/encoder фичами, а не Prophet.
+
+# 8. Цены и промо
+
+```{python}
+#| label: price-dist
+priced = full[full["sell_price"].notna()].copy()
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+for cat in priced["cat_id"].cat.categories:
+    sns.kdeplot(priced.loc[priced["cat_id"] == cat, "sell_price"],
+                ax=axes[0], label=cat, fill=False, clip=(0, 30))
+axes[0].set_title("Распределение цен по категории")
+axes[0].set_xlabel("sell_price, $")
+axes[0].legend()
+
+priced = priced.sort_values(["id", "week_start_date"])
+priced["price_med52"] = (priced.groupby("id", observed=True)["sell_price"]
+                                 .transform(lambda s: s.shift(1).rolling(52, min_periods=8).median()))
+priced["disc_pct"] = (priced["sell_price"] / priced["price_med52"] - 1) * 100
+
+axes[1].hist(priced["disc_pct"].dropna().clip(-50, 30), bins=60,
+              color=sns.color_palette()[3])
+axes[1].axvline(-10, color="k", ls="--", lw=0.8, label="-10% threshold")
+axes[1].set_title("Отклонение цены от 52w trailing median")
+axes[1].set_xlabel("% отклонение")
+axes[1].legend()
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: promo-lift
+priced["is_promo"] = priced["disc_pct"] <= -10
+lift = priced.dropna(subset=["disc_pct"]).groupby(
+    ["cat_id", "is_promo"], observed=True
+)["units"].mean().unstack()
+lift.columns = ["обычная неделя", "промо (-10% от 52w med)"]
+lift["lift, ×"] = (lift["промо (-10% от 52w med)"] /
+                    lift["обычная неделя"]).round(2)
+lift.round(2)
+```
+
+```{python}
+#| label: promo-bar
+#| fig-cap: "Промо lift по категории."
+fig, ax = plt.subplots(figsize=(8, 4))
+lift_plot = lift[["обычная неделя", "промо (-10% от 52w med)"]].reset_index()
+lift_long = lift_plot.melt(id_vars="cat_id", var_name="режим", value_name="units")
+sns.barplot(data=lift_long, x="cat_id", y="units", hue="режим", ax=ax)
+ax.set_title("Средние units / неделя: обычная vs промо")
+ax.set_ylabel("units / неделя / SKU")
+ax.set_xlabel("")
+plt.tight_layout()
+plt.show()
+```
+
+Промо-сигнал слабее, чем в индустрии (lift x1.3 против типичных x2-x4 у FMCG). Причина в том, что у нас прокси через ценовое падение, в данных нет явных промо-флагов (TPR/feature/display). Для прода promo_flag должен быть явным; здесь добавим как фичу `is_promo`, `disc_pct`, `weeks_since_promo`.
+
+# 9. Внешние факторы: SNAP и события
+
+```{python}
+#| label: snap
+snap_eff = (full.groupby(["state_id", "snap_days"], observed=True)["units"]
+                  .mean().unstack(0).round(2))
+snap_eff
+```
+
+```{python}
+#| label: snap-plot
+#| fig-cap: "SNAP-эффект: средние units по числу дней SNAP в неделю, в разрезе штата."
+fig, ax = plt.subplots(figsize=(9, 4))
+for state in snap_eff.columns:
+    ax.plot(snap_eff.index, snap_eff[state], marker="o", lw=1.6, label=state)
+ax.set_xlabel("дней SNAP в неделю")
+ax.set_ylabel("средние units / ряд")
+ax.set_title("SNAP-эффект по штатам")
+ax.legend(title="штат")
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+#| label: events
+ev = calendar[calendar["event_name_1"].notna()][
+    ["date", "wm_yr_wk", "event_name_1", "event_type_1"]
+]
+ev_weekly = (ev.merge(
+        full.groupby("wm_yr_wk")["units"].sum().rename("total_units").reset_index(),
+        on="wm_yr_wk",
+    )
+    .groupby(["event_name_1", "event_type_1"], as_index=False)
+    .agg(weeks=("wm_yr_wk", "nunique"), avg_units=("total_units", "mean"))
+)
+baseline = full.groupby("wm_yr_wk")["units"].sum().mean()
+ev_weekly["lift_vs_baseline"] = (ev_weekly["avg_units"] / baseline).round(2)
+ev_weekly.sort_values("lift_vs_baseline", ascending=False).head(12)
+```
+
+# 10. Кросс-корреляции
+
+```{python}
+#| label: cat-corr
+#| fig-cap: "Корреляция weekly units между категориями и магазинами."
+cat_ts = (full.groupby(["week_start_date", "cat_id"], observed=True)["units"]
+                .sum().unstack())
+fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+sns.heatmap(cat_ts.corr(), annot=True, fmt=".2f", cmap="vlag", vmin=0, vmax=1,
+            ax=axes[0])
+axes[0].set_title("Категории")
+
+store_ts = (full.groupby(["week_start_date", "store_id"], observed=True)["units"]
+                  .sum().unstack())
+sns.heatmap(store_ts.corr(), annot=False, cmap="vlag", vmin=0, vmax=1, ax=axes[1])
+axes[1].set_title("Магазины (10×10)")
+plt.tight_layout()
+plt.show()
+```
+
+# 11. Cold-start: возраст SKU
+
+```{python}
+#| label: coldstart
+#| fig-cap: "Распределение возраста SKU (недель от первой продажи до конца выборки)."
+first_sale = (full[full["units"] > 0]
+                .groupby("id", observed=True)["week_start_date"].min())
+last_week = full["week_start_date"].max()
+age_weeks = ((last_week - first_sale).dt.days / 7).round().astype("int32")
+
+fig, ax = plt.subplots(figsize=(9, 3.5))
+ax.hist(age_weeks, bins=40, color=sns.color_palette()[4])
+ax.set_xlabel("возраст ряда, недель")
+ax.set_ylabel("кол-во рядов")
+ax.set_title("Возраст рядов: сколько недель истории у каждого item×store")
+plt.tight_layout()
+plt.show()
+
+print(f"\nрядов с возрастом < 52 недель: "
+      f"{(age_weeks < 52).sum():,} ({(age_weeks < 52).mean():.1%})")
+print(f"рядов с возрастом < 13 недель: "
+      f"{(age_weeks < 13).sum():,} ({(age_weeks < 13).mean():.1%})")
+```
+
+Доля коротких рядов мала (<5%), но для прод-сценария PepsiCo (запуск новинок) этот процент будет существенно выше. Cold-start стратегия обязательна.
+
+# 12. Стратегия валидации (walk-forward)
+
+```{python}
+#| label: split
+#| fig-cap: "Схема train / val / test. Горизонт прогноза 4 недели, walk-forward 8 фолдов с шагом 1 неделя."
+weeks_sorted = full["week_start_date"].drop_duplicates().sort_values().reset_index(drop=True)
+test_end = weeks_sorted.max()
+test_start = test_end - pd.Timedelta(weeks=3)
+val_end = test_start - pd.Timedelta(weeks=1)
+val_start = val_end - pd.Timedelta(weeks=7)
+train_end = val_start - pd.Timedelta(weeks=1)
+train_start = weeks_sorted.min()
+
+fig, ax = plt.subplots(figsize=(11, 1.6))
+for label, start, end, color in [
+    ("train", train_start, train_end, "#4c72b0"),
+    ("val (gridsearch, 8w)", val_start, val_end, "#dd8452"),
+    ("test (holdout, 4w)", test_start, test_end, "#c44e52"),
+]:
+    ax.barh(0, (end - start).days, left=start, height=0.5, color=color, label=label)
+ax.set_yticks([])
+ax.set_xlim(train_start, test_end + pd.Timedelta(weeks=2))
+ax.set_xlabel("")
+ax.legend(loc="upper left", bbox_to_anchor=(0, -0.4), ncol=3, frameon=False)
+ax.set_title("Train / val / test split")
+plt.tight_layout()
+plt.show()
+
+print(f"train: {train_start.date()} .. {train_end.date()}  "
+      f"({(train_end-train_start).days//7} нед.)")
+print(f"val:   {val_start.date()} .. {val_end.date()}  "
+      f"({(val_end-val_start).days//7+1} нед.)")
+print(f"test:  {test_start.date()} .. {test_end.date()}  "
+      f"({(test_end-test_start).days//7+1} нед.)")
+```
+
+# 13. Выводы для моделирования
+
+Препроцессинг:
+
+- Неполные недели (`n_days < 7`) отбрасываем.
+- OOS-периоды (`available_days == 0`) исключаем из target loss, но оставляем в данных с фичей `is_oos=1`.
+- Target в `log1p` либо Tweedie-loss.
+
+Фичи:
+
+- Лаги target: 1, 2, 4, 13, 26, 52 (по результатам ACF и сезонности).
+- Rolling статистики: mean/std/max за 4, 13, 26 недель.
+- Цена: `sell_price`, `disc_pct` от 52w trailing median, `is_promo`, `weeks_since_promo`.
+- Календарь: `wk_in_year`, `month`, `is_xmas_period` (wk 51 и 1).
+- События: `event_days`, top events one-hot (Super Bowl, Thanksgiving, Christmas, Easter).
+- SNAP: `snap_days` по штату ряда.
+- Иерархия: target encoding по `dept_id`, `store_id`, `state_id`.
+- Возраст ряда: `age_weeks` для cold-start handling.
+
+Архитектура:
+
+- Один global LightGBM/CatBoost на всех 30 490 рядах (как M5 SOTA).
+- Локальные модели не оправдывают вычисления при таком уровне intermittency.
+- Recursive multi-step forecasting на горизонт 4 недели.
+
+Метрики:
+
+- WAPE как главная, устойчива к нулям.
+- Bias = mean(forecast - actual) / mean(actual) для контроля систематического над/недопрогноза.
+- WAPE отдельно по категориям (FOODS / HOBBIES / HOUSEHOLD) и по штатам для контроля провалов.
+
+Валидация:
+
+- Walk-forward CV с 8 фолдами, шаг 1 неделя, горизонт 4 недели.
+- Holdout на последние 4 недели, не трогаем до финала.
+- Cold-start фолд: случайно держим 5% item_id вне train, проверяем отдельно.
