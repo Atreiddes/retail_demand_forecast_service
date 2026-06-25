@@ -20,7 +20,7 @@ execute:
 jupyter: python3
 ---
 
-# 0. Кейс
+# 0. Задача
 
 Прогноз **недельного спроса** на товар × магазин на **4 недели вперёд** на данных M5
 (недельные продажи Walmart, открытый датасет Kaggle). Baseline-решение: простые модели как
@@ -44,7 +44,21 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import lightgbm as lgb
 import optuna
+from joblib import Memory
+from tqdm.auto import tqdm
+from statsmodels.tsa.seasonal import seasonal_decompose
+import plotly.graph_objects as go
 
+memory = Memory(".cache", verbose=0)   # кэш обучений: повторный прогон читает из .cache
+
+
+def cached(func=None, *, ignore=None):
+    """memory.cache со стабильным именем модуля, чтобы кэш переживал перезапуск ядра.
+    По умолчанию joblib именует папку кэша по временному файлу ядра, и при рестарте кэш теряется."""
+    if func is None:
+        return lambda f: cached(f, ignore=ignore)
+    func.__module__ = "nb_cache"
+    return memory.cache(func, ignore=ignore) if ignore else memory.cache(func)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 sns.set_theme(style="whitegrid", palette="colorblind", rc={"figure.dpi": 110})
 pd.set_option("display.float_format", lambda x: f"{x:,.4f}".replace(",", " ").rstrip("0").rstrip("."))
@@ -80,8 +94,27 @@ for c in ["item_id", "dept_id", "store_id", "state_id"]:
 oos = (df["available_days"] == 0).mean()
 zeros = (df["units"] == 0).mean()
 print(f"рядов: {df['id'].nunique():,}  недель: {len(weeks)}  строк: {len(df):,}".replace(",", " "))
+print(f"категория: {df['cat_id'].iat[0]}  отделов: {df['dept_id'].nunique()}  "
+      f"товаров: {df['item_id'].nunique():,}".replace(",", " "))
+print(f"штатов: {df['state_id'].nunique()} ({', '.join(df['state_id'].cat.categories)})  "
+      f"магазинов: {df['store_id'].nunique()}")
 print(f"период: {weeks[0].date()} .. {weeks[-1].date()}")
 print(f"доля недель вне ассортимента (OOS): {oos:.1%}  доля нулевых недель: {zeros:.1%}")
+DATA_SIG = f"{len(df)}-{weeks[-1].date()}-{len(weeks)}-w{WINDOW}"   # короткая подпись данных для ключей кэша
+```
+
+Пропуски на нашем уровне (товар × магазин × неделя): NaN в цене это недели, когда товара не было
+в продаже. Панель полная по строкам (структурные нули, не разрывы), такие недели исключаются из
+обучения.
+
+```{python}
+#| label: missing
+na = df.isna().sum()
+na = na[na > 0]
+print("пропуски (NaN) по столбцам:")
+print(na.to_string() if len(na) else "  нет")
+full = df["id"].nunique() * df[TCOL].nunique()
+print(f"\nполнота панели: {len(df):,} строк = {len(df) / full:.0%} от (ряд × неделя)".replace(",", " "))
 ```
 
 # 2. Анализ данных (EDA)
@@ -225,14 +258,30 @@ frame = build_features(df)
 print(f"признаков: {len(FEATURES + CAT)}  строк в кадре: {len(frame):,}".replace(",", " "))
 ```
 
+Признаки и что они означают:
+
+| признак | что означает |
+|---|---|
+| `lag_4`, `lag_5`, `lag_6`, `lag_8`, `lag_12`, `lag_13`, `lag_26`, `lag_52` | продажи ряда столько недель назад; задают текущий уровень и недавнюю динамику, `lag_52` это спрос той же недели год назад. Все лаги не ближе 4 недель, чтобы на горизонте 4 недели не было утечки |
+| `rmean_4`, `rmean_8`, `rmean_13` | скользящее среднее продаж за 4, 8 и 13 недель (со сдвигом на горизонт); сглаженный уровень спроса на разных окнах |
+| `rstd_8` | скользящее стандартное отклонение за 8 недель; изменчивость ряда |
+| `woy_sin`, `woy_cos` | неделя года через синус и косинус; непрерывная годовая сезонность без разрыва на стыке декабря и января |
+| `month` | номер месяца от 1 до 12; помесячная сезонность |
+| `sell_price` | цена продажи на неделе |
+| `price_rel` | цена относительно 52-недельной медианы ряда; меньше 1 значит дешевле обычного |
+| `is_promo` | признак скидки: цена не выше 0.9 от медианы |
+| `snap_days` | число дней SNAP на неделе; это дни продовольственных талонов США, в них спрос на еду выше |
+| `event_days` | число дней с событием или праздником на неделе (из календаря M5) |
+| `item_id`, `dept_id`, `store_id`, `state_id` | категориальные ключи товара, отдела, магазина и штата; одна модель учится на всех рядах сразу и переносит закономерности между похожими товарами и точками |
+
 ## 3.2. Простые модели (baseline)
 
 Три простые per-series эвристики, каждый ряд считается сам по себе:
 
 - **наивная сезонная**: спрос той же недели год назад;
 - **скользящее среднее MA-4**: среднее последних 4 недель;
-- **MA × сезонный индекс ряда**: уровень MA умножаем на сезонный профиль недели года,
-  посчитанный по истории самого ряда (item × store).
+- **MA × сезонность отдела**: уровень MA умножаем на сезонный множитель отдела (`dept`)
+  по неделе года, извлечённый `seasonal_decompose` (устойчивее профиля по отдельному ряду).
 
 ```{python}
 #| label: simple-models
@@ -255,15 +304,20 @@ def moving_avg(train, test, k=4):
     return t[["id", TCOL, "pred"]]
 
 def seasonal_ma(train, test, k=8):
+    """MA-уровень ряда × сезонный множитель отдела (seasonal_decompose по неделе года)."""
     lvl = ma_level(train, k)
-    tr = train.assign(woy=train[TCOL].dt.isocalendar().week.astype(int))
-    overall = tr.groupby("id", observed=True)["units"].mean()
-    bywoy = tr.groupby(["id", "woy"], observed=True)["units"].mean()
-    sidx = (bywoy / overall.reindex(bywoy.index.get_level_values("id")).to_numpy()).rename("sidx").reset_index()
-    t = test[["id", TCOL]].copy()
+    rows = []
+    for dept, g in train.groupby("dept_id", observed=True):
+        s = g.groupby(TCOL, observed=True)["units"].sum().sort_index()
+        seas = seasonal_decompose(s.values, model="multiplicative", period=52).seasonal
+        woy = pd.Series(s.index).dt.isocalendar().week.astype(int).values
+        factor = pd.Series(seas, index=woy).groupby(level=0).mean()
+        rows += [{"dept_id": dept, "woy": w, "sidx": v} for w, v in factor.items()]
+    sidx = pd.DataFrame(rows)
+    t = test[["id", "dept_id", TCOL]].copy()
     t["woy"] = t[TCOL].dt.isocalendar().week.astype(int)
-    t = t.merge(lvl, on="id", how="left").merge(sidx, on=["id", "woy"], how="left")
-    t["sidx"] = t["sidx"].fillna(1.0).clip(0, 5)
+    t = t.merge(lvl, on="id", how="left").merge(sidx, on=["dept_id", "woy"], how="left")
+    t["sidx"] = t["sidx"].fillna(1.0).clip(0, 3)
     t["pred"] = (t["lvl"].fillna(0.0) * t["sidx"]).clip(lower=0)
     return t[["id", TCOL, "pred"]]
 ```
@@ -292,6 +346,7 @@ DEFAULT = dict(objective="tweedie", tweedie_variance_power=1.1, learning_rate=0.
                bagging_fraction=0.8, bagging_freq=1, lambda_l2=0.1,
                num_threads=0, verbose=-1, force_col_wise=True, seed=42)
 
+@cached
 def lgb_train(tr, params, rounds=400):
     p = {**DEFAULT, **params}
     if p.get("objective") != "tweedie":           # L2 и прочие не используют tweedie_variance_power
@@ -315,15 +370,16 @@ def lgb_predict(model, rows, calib_rows=None):
     return out[["id", TCOL, "pred"]]
 ```
 
-## 3.4. AutoML-бенчмарк (StatsForecast)
+## 3.4. AutoML для сравнения (StatsForecast)
 
-Для сравнения добавляем готовый авто-форкастер из библиотеки StatsForecast (Nixtla): **IMAPA**,
+Добавляем готовую модель автоматического прогноза из библиотеки StatsForecast (Nixtla): **IMAPA**,
 метод для прерывистого спроса, библиотека сама оценивает его параметры по ряду. Его прогноз
 участвует в сравнении моделей ниже (раздел 4.3) строкой «StatsForecast IMAPA».
 
 ```{python}
 #| label: statsforecast
-def sf_forecast(train_raw, test_weeks):
+@cached(ignore=["train_raw"])
+def sf_forecast(train_raw, test_weeks, sig):
     from statsforecast import StatsForecast
     from statsforecast.models import IMAPA
     sdf = train_raw[["id", TCOL, "units"]].rename(columns={"id": "unique_id", TCOL: "ds", "units": "y"})
@@ -356,6 +412,8 @@ def sf_forecast(train_raw, test_weeks):
 LEVELS = [("L1", []), ("L2", ["state_id"]), ("L3", ["store_id"]), ("L4", ["dept_id"]),
           ("L5", ["state_id", "dept_id"]), ("L6", ["store_id", "dept_id"]),
           ("L7", ["item_id"]), ("L8", ["item_id", "state_id"]), ("L9", ["id"])]
+LVL_NAMES = {"L1": "тотал", "L2": "штат", "L3": "магазин", "L4": "отдел", "L5": "штат × отдел",
+             "L6": "магазин × отдел", "L7": "товар", "L8": "товар × штат", "L9": "товар × магазин"}
 
 def _agg(d, keys, val):
     if not keys:
@@ -371,7 +429,7 @@ def _scale(tr_lvl):
     return sc[sc > 0]
 
 def make_scorer(train):
-    """Кэширует scale и веса одного train-фолда, чтобы дёшево скорить много моделей."""
+    """Кэширует scale и веса одного train-фолда, чтобы дёшево оценивать много моделей."""
     last = sorted(train[TCOL].unique())[-4:]
     levels = []
     for _, keys in LEVELS:
@@ -409,7 +467,9 @@ def make_scorer(train):
 
 ## 4.2. Подбор гиперпараметров (Optuna)
 
-Тюним LightGBM по валидационной WRMSSE на блоке до тестовых фолдов (без утечки в тест).
+Подбираем гиперпараметры LightGBM по валидационной WRMSSE на блоке до тестовых фолдов (без утечки
+в тест). Подбор кэшируется (`joblib.Memory`), поэтому повторный прогон берёт параметры из кэша и не
+перебирает варианты заново.
 
 ```{python}
 #| label: optuna
@@ -419,27 +479,34 @@ tr_val = frame[(frame[TCOL] <= val_origin) & (frame["available_days"] > 0)]
 te_val = frame[frame[TCOL].isin(val_w)]
 cal_val = frame[frame[TCOL].isin(list(weeks[weeks <= val_origin][-HORIZON:]))]
 val_actual = df[df[TCOL].isin(val_w)]
-val_scorer = make_scorer(df[df[TCOL] <= val_origin])
 
-def objective(trial):
-    p = dict(num_leaves=trial.suggest_int("num_leaves", 31, 255),
-             min_data_in_leaf=trial.suggest_int("min_data_in_leaf", 50, 500),
-             feature_fraction=trial.suggest_float("feature_fraction", 0.6, 1.0),
-             learning_rate=trial.suggest_float("learning_rate", 0.03, 0.08, log=True))
-    pred = lgb_predict(lgb_train(tr_val, p, rounds=300), te_val, calib_rows=cal_val)
-    return val_scorer(val_actual, pred, "opt")["WRMSSE"]
+# ключ кэша по подписи данных (sig); большие кадры исключаем из ключа через ignore
+@cached(ignore=["tr_val", "te_val", "cal_val", "val_actual", "scorer_train"])
+def tune_lgb(tr_val, te_val, cal_val, val_actual, scorer_train, sig, n_trials=10):
+    val_scorer = make_scorer(scorer_train)
 
-study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
-study.optimize(objective, n_trials=10, show_progress_bar=False)
-best = study.best_params
-print(f"лучшие параметры: {best}")
-print(f"валидационная WRMSSE: {study.best_value:.4f}")
+    def objective(trial):
+        p = dict(num_leaves=trial.suggest_int("num_leaves", 31, 255),
+                 min_data_in_leaf=trial.suggest_int("min_data_in_leaf", 50, 500),
+                 feature_fraction=trial.suggest_float("feature_fraction", 0.6, 1.0),
+                 learning_rate=trial.suggest_float("learning_rate", 0.03, 0.08, log=True))
+        pred = lgb_predict(lgb_train(tr_val, p, rounds=300), te_val, calib_rows=cal_val)
+        return val_scorer(val_actual, pred, "opt")["WRMSSE"]
+
+    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    return study.best_params, study.best_value
+
+best_params, best_value = tune_lgb(tr_val, te_val, cal_val, val_actual, df[df[TCOL] <= val_origin], DATA_SIG)
+print(f"лучшие параметры: {best_params}")
+print(f"валидационная WRMSSE: {best_value:.4f}")
 ```
 
 ## 4.3. Walk-forward и сравнение моделей
 
 Валидация это time-series split (walk-forward): без перемешивания, на каждом фолде учимся только
-на прошлом (`train <= origin`) и проверяем на следующих 4 неделях. 3 фолда, метрики усредняем по ним.
+на прошлом (`train <= origin`) и проверяем на следующих 4 неделях. 3 фолда, метрики усредняем по
+ним. Прогон по фолдам кэшируется: повторный запуск берёт готовые метрики из кэша.
 
 ```{python}
 #| label: walk-forward
@@ -451,26 +518,31 @@ for k in range(N_FOLDS):
     folds.append({"origin": weeks[o], "test_w": list(weeks[o + 1:e + 1])})
 folds = list(reversed(folds))
 
-rows = []
-for fi, fold in enumerate(folds, 1):
-    train_raw = df[df[TCOL] <= fold["origin"]]
-    test_raw = df[df[TCOL].isin(fold["test_w"])]
-    tr = frame[(frame[TCOL] <= fold["origin"]) & (frame["available_days"] > 0)]
-    cal = frame[frame[TCOL].isin(list(weeks[weeks <= fold["origin"]][-HORIZON:]))]
-    te = frame[frame[TCOL].isin(fold["test_w"])]
-    scorer = make_scorer(train_raw)
-    preds = {
-        "наивная сезонная": seasonal_naive(train_raw, test_raw),
-        "MA-4": moving_avg(train_raw, test_raw),
-        "MA × сезонность": seasonal_ma(train_raw, test_raw),
-        "LightGBM Tweedie": lgb_predict(lgb_train(tr, {}), te, calib_rows=cal),
-        "LightGBM + Optuna": lgb_predict(lgb_train(tr, best), te, calib_rows=cal),
-        "StatsForecast IMAPA": sf_forecast(train_raw, fold["test_w"]),
-    }
-    for name, p in preds.items():
-        r = scorer(test_raw, p, name); r["fold"] = fi
-        rows.append(r)
-perfold = pd.DataFrame(rows)
+# ключ кэша по best_params и подписи данных (sig); большие кадры исключаем из ключа через ignore
+@cached(ignore=["df", "frame", "weeks", "folds"])
+def run_walk_forward(df, frame, weeks, folds, best_params, sig):
+    rows = []
+    for fi, fold in enumerate(tqdm(folds, desc="фолды"), 1):
+        train_raw = df[df[TCOL] <= fold["origin"]]
+        test_raw = df[df[TCOL].isin(fold["test_w"])]
+        tr = frame[(frame[TCOL] <= fold["origin"]) & (frame["available_days"] > 0)]
+        cal = frame[frame[TCOL].isin(list(weeks[weeks <= fold["origin"]][-HORIZON:]))]
+        te = frame[frame[TCOL].isin(fold["test_w"])]
+        scorer = make_scorer(train_raw)
+        preds = {
+            "наивная сезонная": seasonal_naive(train_raw, test_raw),
+            "MA-4": moving_avg(train_raw, test_raw),
+            "MA × сезонность": seasonal_ma(train_raw, test_raw),
+            "LightGBM Tweedie": lgb_predict(lgb_train(tr, {}), te, calib_rows=cal),
+            "LightGBM Tweedie + Optuna": lgb_predict(lgb_train(tr, best_params), te, calib_rows=cal),
+            "StatsForecast IMAPA": sf_forecast(train_raw, fold["test_w"], sig),
+        }
+        for name, p in preds.items():
+            r = scorer(test_raw, p, name); r["fold"] = fi
+            rows.append(r)
+    return pd.DataFrame(rows)
+
+perfold = run_walk_forward(df, frame, weeks, folds, best_params, DATA_SIG)
 ```
 
 ```{python}
@@ -506,10 +578,12 @@ ax.legend(); plt.tight_layout(); plt.show()
 #| label: analysis
 #| code-fold: true
 best_model = summary.index[0]
-ma = summary.loc["MA-4", "WRMSSE"]
-gain = (ma - summary.loc[best_model, "WRMSSE"]) / ma * 100
+simple = [m for m in ["наивная сезонная", "MA-4", "MA × сезонность"] if m in summary.index]
+base = summary.loc[simple, "WRMSSE"].idxmin()                     # сильнейший простой baseline
+gain = (summary.loc[base, "WRMSSE"] - summary.loc[best_model, "WRMSSE"]) / summary.loc[base, "WRMSSE"] * 100
 print(f"лучшая модель: {best_model} (WRMSSE {summary.loc[best_model, 'WRMSSE']})")
-print(f"улучшение над MA-4: {gain:+.1f}%")
+print(f"лучший простой baseline: {base} (WRMSSE {summary.loc[base, 'WRMSSE']})")
+print(f"улучшение над лучшим простым baseline: {gain:+.1f}%")
 print(f"Bias лучшей модели после калибровки: {summary.loc[best_model, 'Bias']:+.4f}")
 ```
 
@@ -528,7 +602,7 @@ tef = frame[frame[TCOL].isin(fold["test_w"])]
 sc = make_scorer(tr_raw)
 m_l2 = lgb_train(trf, {"objective": "regression"})
 m_tw = lgb_train(trf, {})
-m_opt = lgb_train(trf, best)
+m_opt = lgb_train(trf, best_params)
 abl = pd.DataFrame([
     sc(te_raw, lgb_predict(m_l2, tef), "1. L2-loss, без калибровки"),
     sc(te_raw, lgb_predict(m_tw, tef), "2. + Tweedie-loss"),
@@ -552,25 +626,49 @@ Tweedie-loss добавляет поверх L2, подбор Optuna даёт н
 #| label: forecast-example
 #| code-fold: true
 ex = tr_raw.groupby("id", observed=True)["units"].sum().sort_values().index[-1]
-hist = df[(df["id"] == ex) & (df[TCOL] > fold["origin"] - pd.Timedelta(weeks=26))]
+hist_ex = df[(df["id"] == ex) & (df[TCOL] > fold["origin"] - pd.Timedelta(weeks=26))]
 p_ma = moving_avg(tr_raw, te_raw)
 p_lgb = lgb_predict(m_opt, tef, calib_rows=calf)
-fig, ax = plt.subplots(figsize=(10, 3.5))
-ax.plot(hist[TCOL], hist["units"], "o-", color="black", label="факт")
-for nm, p in [("MA-4", p_ma), ("LightGBM", p_lgb)]:
+fig = go.Figure()
+fig.add_scatter(x=hist_ex[TCOL], y=hist_ex["units"], name="факт", mode="lines+markers",
+                line={"color": "#37474f", "width": 2.2})
+for nm, p, col in [("MA-4", p_ma, "#2980b9"), ("LightGBM Tweedie + Optuna", p_lgb, "#e67e22")]:
     pe = p[p["id"] == ex]
-    ax.plot(pe[TCOL], pe["pred"], "s--", label=nm)
-ax.axvline(fold["origin"], color="grey", ls=":", lw=1)
-ax.set(title=f"Прогноз и факт: {ex}", ylabel="units"); ax.legend()
-plt.tight_layout(); plt.show()
+    fig.add_scatter(x=pe[TCOL], y=pe["pred"], name=nm, mode="lines+markers",
+                    line={"color": col, "width": 2, "dash": "dash"})
+fig.add_shape(type="line", x0=fold["origin"], x1=fold["origin"], yref="paper", y0=0, y1=1,
+              line={"color": "grey", "width": 1, "dash": "dot"})
+fig.update_layout(title=f"Прогноз и факт: {ex}", template="plotly_white", height=380,
+                  yaxis_title="units", legend={"orientation": "h", "y": -0.25},
+                  margin={"l": 55, "r": 20, "t": 46, "b": 70})
+fig.show()
 ```
 
-## 5.3. Выводы
+## 5.3. Важность признаков
+
+Какие признаки реально использует итоговая модель (прирост по gain, чем больше тем важнее).
+
+```{python}
+#| label: importance
+#| code-fold: true
+imp = (pd.DataFrame({"признак": m_opt.feature_name(), "gain": m_opt.feature_importance(importance_type="gain")})
+       .sort_values("gain").tail(15))
+fig = go.Figure(go.Bar(x=imp["gain"], y=imp["признак"], orientation="h", marker_color="#2980b9"))
+fig.update_layout(title="Важность признаков итоговой модели (LightGBM, прирост по gain)",
+                  template="plotly_white", height=430, xaxis_title="суммарный прирост (gain)",
+                  margin={"l": 120, "r": 20, "t": 50, "b": 40})
+fig.show()
+```
+
+Основной вклад дают лаги спроса и скользящие средние (уровень и динамика ряда), цена и сезонность
+дополняют. Признаки FE-пайплайна действительно работают, а не просто присутствуют.
+
+## 5.4. Выводы
 
 - Наивная сезонная слабая: ассортимент меняется, год назад части рядов не было.
 - MA-4 сильная простая планка: свежее среднее почти несмещено, на агрегатах WRMSSE точно.
-- MA × сезонный индекс хуже MA-4: сезонный профиль по отдельному ряду шумный, мало наблюдений
-  на неделю года.
+- MA × сезонность отдела на уровне MA-4: сезонный множитель отдела устойчив; профиль по
+  отдельному ряду был заметно хуже из-за шума.
 - LightGBM лучший. Из таблицы выше виден вклад правок: основной прирост от калибровки смещения,
   Tweedie-loss и подбор Optuna добавляют поверх.
 
@@ -589,13 +687,521 @@ plt.tight_layout(); plt.show()
 #| label: final-metrics
 #| code-fold: true
 best = summary.index[0]
-imp = (summary.loc["MA-4", "WRMSSE"] - summary.loc[best, "WRMSSE"]) / summary.loc["MA-4", "WRMSSE"] * 100
+simple = [m for m in ["наивная сезонная", "MA-4", "MA × сезонность"] if m in summary.index]
+base = summary.loc[simple, "WRMSSE"].idxmin()
+imp = (summary.loc[base, "WRMSSE"] - summary.loc[best, "WRMSSE"]) / summary.loc[base, "WRMSSE"] * 100
 print("Итоговые метрики качества (среднее по валидационным фолдам):")
 print(f"  лучшая модель:        {best}")
 print(f"  WRMSSE (совокупная):  {summary.loc[best, 'WRMSSE']}")
 print(f"  RMSSE:                {summary.loc[best, 'RMSSE']}")
 print(f"  MASE:                 {summary.loc[best, 'MASE']}")
 print(f"  Bias:                 {summary.loc[best, 'Bias']:+.4f}")
-print(f"  улучшение WRMSSE над MA-4: {imp:+.1f}%")
+print(f"  улучшение над лучшим простым baseline ({base}): {imp:+.1f}%")
 summary
+```
+
+Ориентир M5: в соревновании Kaggle M5 Accuracy лучшие решения по WRMSSE были около 0.52-0.54. Их
+метрика считается иначе (дневной горизонт 28 дней, все 42 840 рядов трёх категорий, 12 уровней
+иерархии), поэтому с нашим числом напрямую не сравнивается: у нас недельный горизонт 4 недели,
+выборка FOODS, 9 уровней, последние 150 недель. Это внешний ориентир порядка величины.
+
+## 6.1. Тепловая карта: WRMSSE по уровням иерархии и моделям
+
+WRMSSE каждой модели на каждом уровне агрегации иерархии M5 (последний фолд). Уровни от верхнего к
+нижнему: тотал (все продажи), штат, магазин, отдел, штат × отдел, магазин × отдел, товар (по всем
+магазинам), товар × штат, товар × магазин (самый нижний). Зелёное лучше, красное хуже; 1.0 это
+уровень наивного недельного шага.
+
+```{python}
+#| label: heatmap
+#| code-fold: true
+last_fold = folds[-1]
+tr_raw_h = df[df[TCOL] <= last_fold["origin"]]
+te_raw_h = df[df[TCOL].isin(last_fold["test_w"])]
+tr_h = frame[(frame[TCOL] <= last_fold["origin"]) & (frame["available_days"] > 0)]
+cal_h = frame[frame[TCOL].isin(list(weeks[weeks <= last_fold["origin"]][-HORIZON:]))]
+te_h = frame[frame[TCOL].isin(last_fold["test_w"])]
+builders = {
+    "наивная сезонная": lambda: seasonal_naive(tr_raw_h, te_raw_h),
+    "MA-4": lambda: moving_avg(tr_raw_h, te_raw_h),
+    "MA × сезонность": lambda: seasonal_ma(tr_raw_h, te_raw_h),
+    "LightGBM Tweedie": lambda: lgb_predict(lgb_train(tr_h, {}), te_h, calib_rows=cal_h),
+    "LightGBM Tweedie + Optuna": lambda: lgb_predict(lgb_train(tr_h, best_params), te_h, calib_rows=cal_h),
+    "StatsForecast IMAPA": lambda: sf_forecast(tr_raw_h, last_fold["test_w"], DATA_SIG),
+}
+model_preds = {nm: build() for nm, build in tqdm(builders.items(), desc="модели")}
+
+@cached(ignore=["train", "test", "model_preds"])
+def level_heat(train, test, model_preds, sig):
+    last4 = sorted(train[TCOL].unique())[-4:]
+    levels = []   # scale и веса от модели не зависят, считаем один раз на уровень
+    for name, keys in LEVELS:
+        base = _agg(train, keys, "units").rename(columns={"units": "v"}).sort_values(["k", TCOL])
+        sc = (base.groupby("k", observed=True)["v"].diff() ** 2).groupby(base["k"]).mean(); sc = sc[sc > 0]
+        if sc.empty:
+            continue
+        wt = _agg(train[train[TCOL].isin(last4)], keys, "revenue").groupby("k")["revenue"].sum()
+        levels.append((name, keys, sc, wt))
+    cols = {}
+    for nm, pred in model_preds.items():
+        t = test.merge(pred, on=["id", TCOL], how="left"); t["pred"] = t["pred"].fillna(0.0)
+        col = {}
+        for name, keys, sc, wt in levels:
+            a = _agg(t, keys, "units").rename(columns={"units": "va"})
+            p = _agg(t.assign(units=t["pred"]), keys, "units").rename(columns={"units": "vp"})
+            m = a.merge(p, on=["k", TCOL], how="left").fillna(0.0)
+            mse = ((m["va"] - m["vp"]) ** 2).groupby(m["k"]).mean(); idx = sc.index.intersection(mse.index)
+            rmsse = np.sqrt(mse[idx] / sc[idx]); w = wt.reindex(rmsse.index).fillna(0.0)
+            col[name] = round((rmsse * w).sum() / max(w.sum(), 1e-9), 3)
+        cols[nm] = col
+    return pd.DataFrame(cols)
+
+
+heat = level_heat(tr_raw_h, te_raw_h, model_preds, f"{DATA_SIG}-heat")
+fig = go.Figure(go.Heatmap(
+    z=heat.values, x=list(heat.columns), y=[LVL_NAMES[l] for l in heat.index],
+    colorscale="RdYlGn_r", zmid=1.0, colorbar={"title": "WRMSSE"},
+    text=heat.round(2).values, texttemplate="%{text}", textfont={"size": 11},
+    hovertemplate="%{y}<br>%{x}<br>WRMSSE %{z}<extra></extra>"))
+fig.update_layout(title="WRMSSE по уровням иерархии и моделям (зелёное лучше, последний фолд)",
+                  template="plotly_white", height=430, yaxis={"autorange": "reversed"},
+                  margin={"l": 120, "r": 20, "t": 56, "b": 80})
+fig.show()
+```
+
+По карте: на агрегатах (тотал, штат, магазин, отдел) бустинг заметно точнее, а на уровне отдельного
+товара простое скользящее среднее не уступает - там преобладает шум ряда. Совокупную WRMSSE
+итоговая модель выигрывает за счёт верхних уровней иерархии.
+
+# 7. Улучшение модели
+
+Показываем переход от простого baseline к улучшенной модели и вклад каждого шага по осям:
+архитектура (LightGBM), постобработка (калибровка, квантили), признаки (события). Считаем на
+последнем фолде, как в разделе 5.1.
+
+```{python}
+#| label: hw7-helpers
+#| code-fold: true
+@cached
+def fit_lgb(tr, te, cal, feats, params=None):
+    """LightGBM на наборе признаков feats с калибровкой смещения."""
+    w = np.log1p(tr["revenue"].clip(lower=0).fillna(0))
+    cats = [c for c in CAT if c in feats]
+    ds = lgb.Dataset(tr[feats], label=tr["units"], weight=w, categorical_feature=cats, free_raw_data=False)
+    m = lgb.train({**DEFAULT, **(params or {})}, ds, num_boost_round=400, callbacks=[lgb.log_evaluation(0)])
+    pred = np.clip(m.predict(te[feats]), 0, None)
+    pred = pred * (cal["units"].sum() / max(np.clip(m.predict(cal[feats]), 0, None).sum(), 1e-9))
+    out = te[["id", TCOL, "available_days"]].copy()
+    out["pred"] = np.where(out["available_days"] == 0, 0.0, pred)
+    return out[["id", TCOL, "pred"]]
+
+
+def add_event_features(d):
+    """Недельные счётчики дней по 4 типам событий из календаря M5."""
+    cal = pd.read_parquet(DATA.parent / "calendar.parquet")
+    types = ["Cultural", "National", "Religious", "Sporting"]
+    cols = [f"ev_{t.lower()}" for t in types]
+    ev = pd.concat([cal[["wm_yr_wk", c]].rename(columns={c: "type"})
+                    for c in ["event_type_1", "event_type_2"]]).dropna()
+    tbl = cal[["wm_yr_wk"]].drop_duplicates().set_index("wm_yr_wk")
+    for t, c in zip(types, cols):
+        tbl[c] = ev[ev["type"] == t].groupby("wm_yr_wk").size().reindex(tbl.index).fillna(0).astype("int8")
+    out = d.merge(tbl.reset_index(), on="wm_yr_wk", how="left")
+    out[cols] = out[cols].fillna(0).astype("int8")
+    return out, cols
+```
+
+## 7.1. От простого baseline к улучшенной модели
+
+```{python}
+#| label: hw7-ladder
+fold = folds[-1]
+train_raw = df[df[TCOL] <= fold["origin"]]
+test_raw = df[df[TCOL].isin(fold["test_w"])]
+tr = frame[(frame[TCOL] <= fold["origin"]) & (frame["available_days"] > 0)]
+cal = frame[frame[TCOL].isin(list(weeks[weeks <= fold["origin"]][-HORIZON:]))]
+te = frame[frame[TCOL].isin(fold["test_w"])]
+scorer = make_scorer(train_raw)
+
+frame_ev, EV = add_event_features(frame)
+tr_ev = frame_ev[(frame_ev[TCOL] <= fold["origin"]) & (frame_ev["available_days"] > 0)]
+cal_ev = frame_ev[frame_ev[TCOL].isin(list(weeks[weeks <= fold["origin"]][-HORIZON:]))]
+te_ev = frame_ev[frame_ev[TCOL].isin(fold["test_w"])]
+
+pred_ma = moving_avg(train_raw, test_raw)
+pred_lgb = fit_lgb(tr, te, cal, FEATURES + CAT)
+pred_final = fit_lgb(tr_ev, te_ev, cal_ev, FEATURES + EV + CAT)
+def wrmsse(pred):
+    return scorer(test_raw, pred, "")["WRMSSE"]
+
+steps = pd.DataFrame([
+    {"шаг": "MA-4 (простой baseline)", "ось": "baseline", "WRMSSE": wrmsse(pred_ma)},
+    {"шаг": "LightGBM (Tweedie + калибровка)", "ось": "архитектура + постобработка",
+     "WRMSSE": wrmsse(pred_lgb)},
+    {"шаг": "+ признаки событий", "ось": "FE", "WRMSSE": wrmsse(pred_final)},
+])
+steps["Δ к пред."] = steps["WRMSSE"].diff().round(4)
+steps
+```
+
+Главный прирост даёт переход от простого MA к LightGBM (архитектура и калибровка смещения,
+разложение в разделе 5.1). Признаки событий добавляют небольшой выигрыш по FE-оси.
+
+## 7.2. Постобработка: квантильный прогноз P10/P50/P90
+
+Точечный прогноз дополняем интервалом: три LightGBM с pinball-loss (квантильная функция потерь).
+Pinball-loss штрафует ошибку асимметрично: при alpha=0.9 перепрогноз дешевле недопрогноза, поэтому
+минимум достигается на P90 и модель учит нужный квантиль напрямую. Верхний квантиль P90 задаёт
+уровень под страховой запас. Качество интервала измеряем покрытием: это доля недель, где факт
+оказался не выше прогноза квантиля. Для P90 покрытие должно быть около 0.9, для P50 около 0.5; чем
+ближе покрытие к уровню квантиля, тем точнее откалиброван интервал.
+
+```{python}
+#| label: hw7-quantiles
+#| code-fold: true
+@cached
+def fit_quantile(tr, te, feats, alpha):
+    p = {k: v for k, v in DEFAULT.items() if k != "tweedie_variance_power"}
+    p.update(objective="quantile", alpha=alpha)
+    w = np.log1p(tr["revenue"].clip(lower=0).fillna(0))
+    cats = [c for c in CAT if c in feats]
+    ds = lgb.Dataset(tr[feats], label=tr["units"], weight=w, categorical_feature=cats, free_raw_data=False)
+    m = lgb.train(p, ds, num_boost_round=400, callbacks=[lgb.log_evaluation(0)])
+    out = te[["id", TCOL]].copy()
+    out["pred"] = np.clip(m.predict(te[feats]), 0, None)
+    return out
+
+qt = test_raw[["id", TCOL, "units"]].copy()
+for q in [0.1, 0.5, 0.9]:
+    qt = qt.merge(fit_quantile(tr, te, FEATURES + CAT, q).rename(columns={"pred": f"q{q}"}),
+                  on=["id", TCOL])
+pd.DataFrame([{"квантиль": f"P{int(q * 100)}", "цель": q,
+               "покрытие": round((qt["units"] <= qt[f"q{q}"]).mean(), 3)} for q in [0.1, 0.5, 0.9]])
+```
+
+Интервал прогноза на примере ряда с большим объёмом: лента P10-P90 вокруг точечного P50 против факта.
+
+```{python}
+#| label: quantile-band
+#| code-fold: true
+ex_q = test_raw.groupby("id", observed=True)["units"].sum().sort_values().index[-1]
+qe = qt[qt["id"] == ex_q].sort_values(TCOL)
+fig = go.Figure()
+fig.add_scatter(x=qe[TCOL], y=qe["q0.9"], line={"width": 0}, showlegend=False, hoverinfo="skip")
+fig.add_scatter(x=qe[TCOL], y=qe["q0.1"], fill="tonexty", fillcolor="rgba(41,128,185,0.2)",
+                line={"width": 0}, name="интервал P10-P90")
+fig.add_scatter(x=qe[TCOL], y=qe["q0.5"], mode="lines+markers", line={"color": "#2980b9"}, name="прогноз P50")
+fig.add_scatter(x=qe[TCOL], y=qe["units"], mode="lines+markers", line={"color": "#111"}, name="факт")
+fig.update_layout(title=f"Квантильный интервал прогноза: {ex_q}", template="plotly_white", height=380,
+                  yaxis_title="units", legend={"orientation": "h", "y": -0.25}, margin={"l": 55, "r": 20, "t": 46, "b": 70})
+fig.show()
+```
+
+## 7.3. Разрез метрик финальной модели по уровням иерархии
+
+WRMSSE финальной модели по каждому уровню агрегации: видно, где модель точна (агрегаты) и где
+сложнее (отдельный товар).
+
+```{python}
+#| label: hw7-levels
+#| code-fold: true
+t = test_raw.merge(pred_final, on=["id", TCOL])
+last = sorted(train_raw[TCOL].unique())[-4:]
+rows = []
+for name, keys in LEVELS:
+    base = _agg(train_raw, keys, "units").rename(columns={"units": "v"}).sort_values(["k", TCOL])
+    sc = (base.groupby("k", observed=True)["v"].diff() ** 2).groupby(base["k"]).mean()
+    sc = sc[sc > 0]
+    if sc.empty:
+        continue
+    a = _agg(t, keys, "units").rename(columns={"units": "va"})
+    p = _agg(t.assign(units=t["pred"]), keys, "units").rename(columns={"units": "vp"})
+    m = a.merge(p, on=["k", TCOL], how="left").fillna(0.0)
+    mse = ((m["va"] - m["vp"]) ** 2).groupby(m["k"]).mean()
+    idx = sc.index.intersection(mse.index)
+    rmsse = np.sqrt(mse[idx] / sc[idx])
+    wt = _agg(train_raw[train_raw[TCOL].isin(last)], keys, "revenue").groupby("k")["revenue"].sum()
+    wt = wt.reindex(rmsse.index).fillna(0.0)
+    rows.append({"уровень": LVL_NAMES[name], "WRMSSE": round((rmsse * wt).sum() / max(wt.sum(), 1e-9), 4)})
+pd.DataFrame(rows)
+```
+
+Точность растёт с агрегацией: на тотале и по магазинам WRMSSE ниже, на уровне отдельного товара
+выше. Шум прерывистого ряда усредняется на агрегатах.
+
+# 8. Реальный прогноз вперёд и интерактивный просмотр
+
+Финальную модель (LightGBM Tweedie + Optuna с калибровкой) обучаем на всех неделях и прогнозируем
+следующие 4 недели, для которых факта ещё нет. Признаки будущих недель собираем без утечки: лаги
+считаются из реальной истории (все лаги сдвинуты на 4 недели и более), SNAP и события известны
+заранее из календаря, цена перенесена с последней известной недели.
+
+## 8.1. Прогноз на 4 недели вперёд
+
+```{python}
+#| label: real-forecast
+tr_all = frame[frame["available_days"] > 0]                       # обучение на всех неделях
+m_final = lgb_train(tr_all, best_params)
+cal_final = frame[frame[TCOL].isin(weeks[-HORIZON:])]             # блок калибровки смещения
+
+cal = pd.read_parquet(DATA.parent / "calendar.parquet")          # будущие недели из календаря
+calw = (cal.groupby("wm_yr_wk")
+        .agg(**{TCOL: ("date", "min"), "event_days": ("has_event", "sum"),
+                "snap_CA": ("snap_CA", "sum"), "snap_TX": ("snap_TX", "sum"),
+                "snap_WI": ("snap_WI", "sum")})
+        .reset_index())
+future = calw[calw[TCOL] > weeks[-1]].sort_values(TCOL).head(HORIZON)
+
+series = df[["id", "item_id", "dept_id", "store_id", "state_id"]].drop_duplicates()
+last = df.sort_values(TCOL).groupby("id", observed=True).tail(1).set_index("id")
+fut = series.merge(future, how="cross")
+fut["snap_days"] = np.select(
+    [fut["state_id"] == "CA", fut["state_id"] == "TX", fut["state_id"] == "WI"],
+    [fut["snap_CA"], fut["snap_TX"], fut["snap_WI"]], default=0).astype("int8")
+fut["event_days"] = fut["event_days"].astype("int8")
+fut["available_days"] = 7
+fut["units"] = np.nan
+fut["sell_price"] = fut["id"].map(last["sell_price"]).astype("float32")
+fut["price_rel"] = fut["id"].map(last["price_rel"]).astype("float32")
+fut["is_promo"] = fut["id"].map(last["is_promo"]).astype("int8")
+
+cols = ["id", "item_id", "dept_id", "store_id", "state_id", "wm_yr_wk", TCOL,
+        "units", "sell_price", "snap_days", "available_days", "event_days", "price_rel", "is_promo"]
+allrows = pd.concat([df[cols], fut[cols]], ignore_index=True)
+for c in CAT:
+    allrows[c] = pd.Categorical(allrows[c], categories=df[c].cat.categories)
+allframe = build_features(allrows)
+fut_feat = allframe[allframe[TCOL].isin(future[TCOL])]
+real_fc = lgb_predict(m_final, fut_feat, calib_rows=cal_final)
+
+print("прогноз на недели:", ", ".join(str(w.date()) for w in future[TCOL]))
+print(f"суммарный спрос FOODS (прогноз вперёд): {real_fc['pred'].sum():,.0f}".replace(",", " "))
+real_fc.head()
+```
+
+## 8.2. Итоговая модель: из чего она и почему точнее
+
+Итоговая модель это одна глобальная LightGBM, обученная сразу на всех рядах item × store, с прямым
+прогнозом на 4 недели. Признаки: лаги спроса (включая годовой), скользящие среднее и разброс,
+сезонность неделей года и месяцем, цена и признак скидки, SNAP и события, категориальные ключи
+иерархии (товар, отдел, магазин, штат).
+
+Почему она точнее простых моделей и AutoML:
+
+1. Общее обучение по всем рядам: переносит закономерности между похожими товарами и магазинами,
+   прерывистый ряд получает прогноз за счёт похожих. Per-series методы (наивная, MA) и AutoML IMAPA
+   так не умеют.
+2. Tweedie-loss под прерывистый спрос (нули и скошенная положительная часть).
+3. Калибровка смещения убирает систематический перепрогноз - главный вклад в WRMSSE, который
+   усредняет уровни иерархии и чувствителен к смещению на агрегатах.
+4. Вес наблюдений по выручке согласует обучение с целевой метрикой.
+5. Подбор Optuna добавляет небольшой прирост поверх.
+
+По тепловой карте раздела 6.1 видно, где это работает: на агрегатах бустинг заметно точнее, а на
+уровне отдельного товара простые модели не уступают.
+
+## 8.3. Метрики качества (интерактивная таблица)
+
+```{python}
+#| label: plotly-metrics
+#| code-fold: true
+st = summary.reset_index()
+metric_cols = ["WRMSSE", "RMSSE", "MASE", "Bias"]
+cmap = plt.get_cmap("RdYlGn_r")   # 0 = зелёный (лучший), 1 = красный (худший)
+
+
+def grad(vals, use_abs=False):
+    v = np.abs(np.asarray(vals, float)) if use_abs else np.asarray(vals, float)
+    lo, hi = v.min(), v.max()
+    norm = np.zeros_like(v) if hi == lo else (v - lo) / (hi - lo)   # меньше = лучше
+    return ["rgba({},{},{},0.6)".format(*(int(255 * x) for x in cmap(n)[:3])) for n in norm]
+
+
+# Bias оцениваем по модулю (ближе к нулю лучше), остальные метрики по значению (меньше лучше)
+fill = [["#f4f4f4"] * len(st)] + [grad(st[c], use_abs=(c == "Bias")) for c in metric_cols]
+metrics_fig = go.Figure(go.Table(
+    columnwidth=[2.4, 1, 1, 1, 1],
+    header=dict(values=["модель"] + metric_cols,
+                fill_color="#2c3e50", font=dict(color="white", size=13), align="left", height=30),
+    cells=dict(values=[st["модель"]] + [st[c] for c in metric_cols],
+               fill_color=fill, font=dict(color="#222", size=12), align="left", height=26)))
+metrics_fig.update_layout(title="Метрики качества по моделям (зелёный лучше, красный хуже; среднее по фолдам)",
+                          margin=dict(t=46, b=6, l=6, r=6), height=270)
+metrics_fig.show()
+```
+
+## 8.4. Интерактивная панель: факт и все прогнозы
+
+Каскадные выпадающие списки выбирают уровень (штат, магазин, отдел, товар). На графике факт, прогнозы всех
+моделей на тестовых неделях (включаются кликом по легенде) и реальный прогноз итоговой модели на
+4 недели вперёд. Сбоку RMSSE и Bias всех моделей на выбранном срезе. Данные считаются в Python,
+переключение и отрисовку делает встроенный JS с plotly.
+
+```{python}
+#| label: plotly-panel
+#| code-fold: true
+import json
+from IPython.display import HTML, display
+
+HKEYS = ["state_id", "store_id", "dept_id", "item_id"]
+PANEL_TOP = 15
+ORIGIN, TEST_W = folds[-1]["origin"], folds[-1]["test_w"]
+META = df[["id"] + HKEYS].drop_duplicates()
+id2item = META.set_index("id")["item_id"]
+hist = df[(df[TCOL] > ORIGIN - pd.Timedelta(weeks=22)) & (df[TCOL] <= ORIGIN)]
+test_act = df[df[TCOL].isin(TEST_W)]
+train_full = df[df[TCOL] <= ORIGIN]
+vol = train_full.groupby("id", observed=True)["units"].sum()
+mp = {nm: p.merge(META, on="id") for nm, p in model_preds.items()}
+real = real_fc.merge(META, on="id")
+_wk = lambda idx: [d.strftime("%Y-%m-%d") for d in idx]
+_r = lambda v: [round(float(x), 1) for x in v]
+
+
+@cached(ignore=["hist", "test_act", "train_full", "real", "mp", "vol"])
+def panel_payload(hist, test_act, train_full, real, mp, vol, sig):
+    E = pd.Series(dtype="float64")
+
+    def nodes(tbl, val, keys):
+        return {(k if isinstance(k, tuple) else (k,)): s.groupby(TCOL, observed=True)[val].sum()
+                for k, s in tbl.groupby(keys, observed=True)}
+
+    def pack(a, h, r, tr, mser):
+        sc = float((tr.diff() ** 2).mean()); ty, met = {}, {}
+        for nm in mp:
+            p = mser.get(nm, a * 0).reindex(a.index).fillna(0)
+            ty[nm] = _r(p.values); mse = float(((a - p) ** 2).mean())
+            met[nm] = {"rmsse": round((mse / sc) ** 0.5, 3) if sc > 0 else None,
+                       "bias": round(float((p.sum() - a.sum()) / a.sum()), 3) if a.sum() > 0 else None}
+        return {"series": {"hx": _wk(h.index), "hy": _r(h.values), "tx": _wk(a.index), "ta": _r(a.values),
+                           "ty": ty, "fx": _wk(r.index), "fy": _r(r.values)}, "metrics": met}
+
+    def assemble(keys, ids=None):
+        flt = (lambda t: t[t["id"].isin(ids)]) if ids is not None else (lambda t: t)
+        H = nodes(flt(hist), "units", keys); R = nodes(flt(real), "pred", keys)
+        A = nodes(flt(test_act), "units", keys); TR = nodes(flt(train_full), "units", keys)
+        M = {nm: nodes(flt(mp[nm]), "pred", keys) for nm in mp}
+        return {n: pack(a, H.get(n, E), R.get(n, E), TR.get(n, E), {nm: M[nm].get(n, E) for nm in mp})
+                for n, a in A.items()}
+
+    top = set()
+    for (sto, dp), gg in META.groupby(["store_id", "dept_id"], observed=True):
+        top |= set(vol.reindex(gg["id"]).sort_values(ascending=False).head(PANEL_TOP).index)
+    L1 = assemble(["state_id"]); L2 = assemble(["state_id", "store_id"])
+    L3 = assemble(["state_id", "store_id", "dept_id"]); L4 = assemble(HKEYS, top)
+    glob = pack(test_act.groupby(TCOL)["units"].sum(), hist.groupby(TCOL)["units"].sum(),
+                real.groupby(TCOL)["pred"].sum(), train_full.groupby(TCOL)["units"].sum(),
+                {nm: mp[nm].groupby(TCOL)["pred"].sum() for nm in mp})
+    data = {}
+    for st in sorted(META["state_id"].unique()):
+        sm = META[META.state_id == st]; stores = {}
+        for sto in sorted(sm["store_id"].unique()):
+            dm0 = sm[sm.store_id == sto]; depts = {}
+            for dp in sorted(dm0["dept_id"].unique()):
+                dm = dm0[dm0.dept_id == dp]
+                tids = vol.reindex(dm["id"]).sort_values(ascending=False).head(PANEL_TOP).index
+                items = {str(id2item[i]): L4[(st, sto, dp, id2item[i])] for i in tids
+                         if (st, sto, dp, id2item[i]) in L4}
+                depts[str(dp)] = {"agg": L3[(st, sto, dp)], "items": items, "it_order": list(items)}
+            stores[str(sto)] = {"agg": L2[(st, sto)], "depts": depts,
+                                "dp_order": [str(d) for d in sorted(dm0["dept_id"].unique())]}
+        data[str(st)] = {"agg": L1[(st,)], "stores": stores,
+                         "st_order": [str(s) for s in sorted(sm["store_id"].unique())]}
+    return {"states": list(data), "data": data, "global": glob,
+            "models": list(mp), "cutoff": ORIGIN.strftime("%Y-%m-%d")}
+
+
+payload = panel_payload(hist, test_act, train_full, real, mp, vol, f"{DATA_SIG}-panel")
+_data = json.dumps(payload, ensure_ascii=False)
+
+import plotly.io as pio
+
+# пустая фигура нужна, чтобы вывод ячейки сам встроил библиотеку plotly.js и контейнер графика:
+# в песочнице вывода VSCode внешний CDN не грузится, поэтому plotly кладём прямо в вывод
+_fig0 = go.Figure()
+_fig0.update_layout(template="plotly_white", height=440, yaxis_title="units", xaxis_title="неделя",
+                    margin={"l": 55, "r": 12, "t": 8, "b": 70})
+_plot = pio.to_html(_fig0, include_plotlyjs=True, full_html=False, div_id="pn-plot",
+                    config={"displayModeBar": False, "responsive": True})
+
+_HTML = r"""
+<style>
+  .pn{background:#fff;padding:14px;border:1px solid #e3e3e3;border-radius:8px;margin:10px 0;font-family:-apple-system,'Segoe UI',sans-serif;color:#222;}
+  .pn-c{display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap;align-items:flex-end;}
+  .pn-c label{font-size:11px;font-weight:600;color:#666;display:block;margin-bottom:3px;}
+  .pn-c select{padding:6px 9px;border:1px solid #bbb;border-radius:4px;font-size:13px;min-width:150px;background:#fafafa;}
+  .pn-h{font-size:13px;font-weight:600;margin:4px 0 8px;color:#444;}
+  .pn-w{display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;}
+  .pn-plot-host{flex:1;min-width:480px;}
+  .pn-k{width:300px;font-size:12px;}
+  .pn-k table{border-collapse:collapse;width:100%;}
+  .pn-k th{background:#37474f;color:#fff;padding:5px 8px;font-weight:600;}
+  .pn-k td{padding:4px 8px;text-align:center;border-bottom:1px solid #eee;}
+</style>
+<div class="pn">
+  <div class="pn-c">
+    <div><label>Штат</label><select id="pn-s"></select></div>
+    <div><label>Магазин</label><select id="pn-st"></select></div>
+    <div><label>Отдел</label><select id="pn-d"></select></div>
+    <div><label>Товар</label><select id="pn-it"></select></div>
+  </div>
+  <div class="pn-h" id="pn-title">-</div>
+  <div class="pn-w"><div class="pn-plot-host">__PLOT__</div><div class="pn-k" id="pn-folds"></div></div>
+</div>
+<script>
+(function(){
+  function boot(){
+    if(!window.Plotly || !document.getElementById("pn-plot")){return setTimeout(boot, 30);}
+    var P=__DATA__, ALL="(все)", D=P.data, MODELS=P.models, CUT=P.cutoff;
+    var PAL=["#7f8c8d","#2980b9","#16a085","#8e44ad","#e67e22","#27ae60"], COL={};
+    MODELS.forEach(function(m,i){COL[m]=PAL[i%PAL.length];});
+    var st={s:ALL,st:ALL,d:ALL,it:ALL}, $=function(id){return document.getElementById(id);};
+    var eS=$("pn-s"),eSt=$("pn-st"),eD=$("pn-d"),eIt=$("pn-it"),eT=$("pn-title"),eF=$("pn-folds");
+    var opt=function(s,a,v){s.innerHTML="";a.forEach(function(t){var o=document.createElement("option");o.value=t;o.textContent=t;s.appendChild(o);});s.value=v;};
+    function node(){
+      if(st.s===ALL)return P.global; var a=D[st.s];
+      if(st.st===ALL)return a.agg; var b=a.stores[st.st];
+      if(st.d===ALL)return b.agg; var c=b.depts[st.d];
+      if(st.it===ALL)return c.agg; return c.items[st.it];
+    }
+    var f3=function(v){return v==null?"-":v.toFixed(3);}, sg=function(v){return v==null?"-":(v>=0?"+":"")+v.toFixed(3);};
+    function draw(){
+      try{
+        var nd=node(); if(!nd){eT.textContent="нет данных для выбранного среза";return;}
+        var s=nd.series, tr=[];
+        tr.push({x:s.hx.concat(s.tx),y:s.hy.concat(s.ta),name:"факт",mode:"lines+markers",line:{color:"#111",width:2.4}});
+        MODELS.forEach(function(m){tr.push({x:s.tx,y:(s.ty[m]||[]),name:m,mode:"lines+markers",line:{color:COL[m],width:1.6,dash:"dot"}});});
+        tr.push({x:s.fx,y:s.fy,name:"реальный прогноз вперёд",mode:"lines+markers",line:{color:"#c0392b",width:2.6}});
+        Plotly.react("pn-plot",tr,{template:"plotly_white",height:440,yaxis:{title:"units"},xaxis:{title:"неделя"},
+          margin:{l:55,r:12,t:8,b:70},hovermode:"x unified",legend:{orientation:"h",y:-0.28},
+          shapes:[{type:"line",x0:CUT,x1:CUT,yref:"paper",y0:0,y1:1,line:{color:"grey",width:1,dash:"dash"}}]},
+          {responsive:true,displayModeBar:false});
+        var lvl=st.it!==ALL?"товар":(st.d!==ALL?"отдел":(st.st!==ALL?"магазин":(st.s!==ALL?"штат":"итог")));
+        eT.textContent=st.s+" / "+st.st+" / "+st.d+" / "+st.it+"  -  "+lvl+", последний фолд";
+        var _rm=MODELS.map(function(m){return (nd.metrics||{})[m]||{};});
+        var _bR=Math.min.apply(null,_rm.map(function(r){return r.rmsse==null?Infinity:r.rmsse;}));
+        var _bB=Math.min.apply(null,_rm.map(function(r){return r.bias==null?Infinity:Math.abs(r.bias);}));
+        var h="<b>RMSSE и Bias на срезе</b><table><tr><th>модель</th><th>RMSSE</th><th>Bias</th></tr>";
+        MODELS.forEach(function(m){var r=(nd.metrics||{})[m]||{};
+          var cR=(r.rmsse!=null&&r.rmsse===_bR)?"<b>"+f3(r.rmsse)+"</b>":f3(r.rmsse);
+          var cB=(r.bias!=null&&Math.abs(r.bias)===_bB)?"<b>"+sg(r.bias)+"</b>":sg(r.bias);
+          h+="<tr><td style='text-align:left'>"+m+"</td><td>"+cR+"</td><td>"+cB+"</td></tr>";});
+        eF.innerHTML=h+"</table>";
+      }catch(e){eT.textContent="ошибка отрисовки: "+(e&&e.message?e.message:e); if(window.console)console.error(e);}
+    }
+    var fSt=function(){opt(eSt, st.s===ALL?[ALL]:[ALL].concat(D[st.s].st_order), st.st);};
+    var fD=function(){opt(eD, (st.s!==ALL&&st.st!==ALL)?[ALL].concat(D[st.s].stores[st.st].dp_order):[ALL], st.d);};
+    var fIt=function(){opt(eIt, (st.s!==ALL&&st.st!==ALL&&st.d!==ALL)?[ALL].concat(D[st.s].stores[st.st].depts[st.d].it_order||[]):[ALL], st.it);};
+    opt(eS,[ALL].concat(P.states),ALL); fSt(); fD(); fIt();
+    eS.onchange=function(){st.s=eS.value;st.st=ALL;st.d=ALL;st.it=ALL;fSt();fD();fIt();draw();};
+    eSt.onchange=function(){st.st=eSt.value;st.d=ALL;st.it=ALL;fD();fIt();draw();};
+    eD.onchange=function(){st.d=eD.value;st.it=ALL;fIt();draw();};
+    eIt.onchange=function(){st.it=eIt.value;draw();};
+    draw();
+  }
+  boot();
+})();
+</script>
+"""
+display(HTML(_HTML.replace("__DATA__", _data).replace("__PLOT__", _plot)))
 ```
