@@ -1,0 +1,28 @@
+# Установка зависимостей
+setup:
+    uv sync
+
+# Подготовка данных и обучение артефакта модели
+artifact:
+    python scripts/prepare_data.py
+    python scripts/train_artifact.py
+
+# Наполнение базы стартовыми данными
+seed:
+    python -m forecast_service.seed
+
+# Поднять весь стек
+up:
+    docker compose up -d --build
+
+# Остановить и удалить тома
+down:
+    docker compose down -v
+
+# Тесты
+test:
+    uv run pytest -q
+
+# Демонстрация горизонтального масштабирования воркеров
+scale-demo:
+    docker compose up -d --scale worker=4
