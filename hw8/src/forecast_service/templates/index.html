@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Новый прогон</h1>
+
+<form id="run-form" class="card">
+  <div class="field">
+    <label for="store_id">Магазин</label>
+    <select id="store_id" name="store_id" required>
+      {% for s in stores %}
+      <option value="{{ s }}">{{ s }}</option>
+      {% endfor %}
+    </select>
+  </div>
+
+  <div class="field">
+    <label>Категория</label>
+    <span class="fixed">FOODS</span>
+    <input type="hidden" id="cat_id" name="cat_id" value="FOODS">
+  </div>
+
+  <div class="field">
+    <label for="horizon_weeks">Горизонт, недель</label>
+    <input type="number" id="horizon_weeks" name="horizon_weeks" min="1" max="4" value="4" required>
+  </div>
+
+  <div class="field">
+    <label for="origin">Начало (необязательно)</label>
+    <input type="date" id="origin" name="origin">
+  </div>
+
+  <button type="submit">Запустить прогон</button>
+  <span id="form-error" class="error"></span>
+</form>
+
+<h2>Последние прогоны</h2>
+<table class="grid">
+  <thead>
+    <tr>
+      <th>Прогон</th>
+      <th>Магазин</th>
+      <th>Статус</th>
+      <th>Создан</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in runs %}
+    <tr>
+      <td><a href="/runs/{{ r.id }}">{{ r.id }}</a></td>
+      <td>{{ r.store_id }}</td>
+      <td>{{ r.status }}</td>
+      <td>{{ r.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<script>
+document.getElementById("run-form").addEventListener("submit", async function (e) {
+  e.preventDefault();
+  const err = document.getElementById("form-error");
+  err.textContent = "";
+
+  const origin = document.getElementById("origin").value;
+  const body = {
+    store_id: document.getElementById("store_id").value,
+    cat_id: document.getElementById("cat_id").value,
+    horizon_weeks: parseInt(document.getElementById("horizon_weeks").value, 10)
+  };
+  if (origin) body.origin = origin;
+
+  try {
+    const resp = await fetch("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) throw new Error("Сервер вернул " + resp.status);
+    const data = await resp.json();
+    window.location = "/runs/" + data.run_id;
+  } catch (ex) {
+    err.textContent = "Не удалось запустить: " + ex.message;
+  }
+});
+</script>
+{% endblock %}

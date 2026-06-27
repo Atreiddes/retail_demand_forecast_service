@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Прогноз спроса</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/plotly.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Прогноз спроса</a>
+    <nav class="links">
+      <a href="/api/docs">Swagger</a>
+      <a href="http://localhost:15672" target="_blank" rel="noopener">Очередь</a>
+    </nav>
+  </header>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
