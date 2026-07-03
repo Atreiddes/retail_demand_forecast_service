@@ -27,12 +27,14 @@ def connect():
 
 def publish(messages):
     conn = connect()
-    ch = conn.channel()
-    ch.queue_declare(queue=QUEUE, durable=True)
-    for m in messages:
-        ch.basic_publish("", QUEUE, json.dumps(m),
-                         properties=pika.BasicProperties(delivery_mode=2))
-    conn.close()
+    try:
+        ch = conn.channel()
+        ch.queue_declare(queue=QUEUE, durable=True)
+        for m in messages:
+            ch.basic_publish("", QUEUE, json.dumps(m),
+                             properties=pika.BasicProperties(delivery_mode=2))
+    finally:
+        conn.close()
 
 
 def consume(handle):

@@ -28,16 +28,21 @@ def load_artifact():
     if _ART:
         return _ART
     d = settings.artifact_dir
-    _ART["point"] = lgb.Booster(model_file=str(d / "model.txt"))
-    _ART["q"] = {q: lgb.Booster(model_file=str(d / f"q{q}.txt")) for q in QUANTILES}
-    _ART["cats"] = json.loads((d / "categories.json").read_text(encoding="utf-8"))
-    _ART["factor"] = json.loads((d / "calibration.json").read_text())["factor"]
+    # собираем в локальный словарь и публикуем в кэш только после полной успешной загрузки:
+    # иначе при отсутствии/порче любого файла в _ART осел бы полузаполненный словарь навсегда
+    art = {}
+    art["point"] = lgb.Booster(model_file=str(d / "model.txt"))
+    art["q"] = {q: lgb.Booster(model_file=str(d / f"q{q}.txt")) for q in QUANTILES}
+    art["cats"] = json.loads((d / "categories.json").read_text(encoding="utf-8"))
+    art["factor"] = json.loads((d / "calibration.json").read_text())["factor"]
     card = json.loads((d / "model_card.json").read_text(encoding="utf-8"))
-    _ART["model_version"] = card["model_version"]
-    _ART["origin"] = pd.Timestamp(card["origin"])
-    _ART["wrmsse"] = card.get("wrmsse_foods_backtest")
+    art["model_version"] = card["model_version"]
+    art["origin"] = pd.Timestamp(card["origin"])
+    art["wrmsse"] = card.get("wrmsse_foods_backtest")
     feat = json.loads((d / "features.json").read_text(encoding="utf-8"))["feature_name"]
-    assert feat == _ART["point"].feature_name() == FEATURES, "признаки артефакта не совпадают с моделью"
+    if not (feat == art["point"].feature_name() == FEATURES):
+        raise RuntimeError("признаки артефакта не совпадают с моделью")
+    _ART.update(art)
     return _ART
 
 
@@ -58,7 +63,9 @@ def _weekly_calendar():
 def _future_rows(hist, origin, horizon):
     """H будущих полных недель на ряд: цена и available с origin, snap/события из календаря."""
     weeks = [origin + timedelta(weeks=h) for h in range(1, horizon + 1)]
-    base = hist[hist[TCOL] == origin][
+    # последняя доступная неделя ряда (<= origin), а не строго origin: ряд без строки ровно
+    # на origin (дыра в истории или origin не на границе недели) иначе молча выпал бы из прогноза
+    base = hist.sort_values(TCOL).groupby("id", sort=False).tail(1)[
         ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id", "sell_price", "available_days"]]
     rows = base.merge(pd.DataFrame({TCOL: weeks}), how="cross")
     wk = _weekly_calendar()

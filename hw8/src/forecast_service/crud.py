@@ -99,6 +99,17 @@ def fail_chunk(chunk_id, error, worker_id):
         s.commit()
 
 
+def fail_run(run_id):
+    """Пометить прогон и его незабранные пачки FAILED (например, если публикация в очередь не удалась),
+    чтобы прогон стал терминальным, а не завис в QUEUED."""
+    with Session(engine) as s:
+        s.execute(text("UPDATE forecast_chunk SET status='failed', error='не опубликовано в очередь' "
+                       "WHERE run_id=:id AND status='queued'"), {"id": run_id})
+        s.execute(text("UPDATE forecast_run SET status='failed', finished_at=now() "
+                       "WHERE id=:id AND status IN ('queued','processing')"), {"id": run_id})
+        s.commit()
+
+
 def finalize_run(run_id):
     """Если все пачки терминальны - атомарно перевести прогон в COMPLETED или PARTIAL."""
     with Session(engine) as s:

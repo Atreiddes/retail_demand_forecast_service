@@ -73,13 +73,17 @@ def health():
 @app.post("/api/runs", status_code=202)
 def create_run(req: RunRequest):
     art = load_artifact()
-    origin = date.fromisoformat(req.origin) if req.origin else art["origin"].date()
     try:
+        origin = date.fromisoformat(req.origin) if req.origin else art["origin"].date()
         run_id, msgs = crud.create_run(req.store_id or None, req.cat_id,
                                        req.horizon_weeks, origin, art["model_version"])
     except ValueError as e:
         raise HTTPException(422, str(e))
-    mq.publish(msgs)
+    try:
+        mq.publish(msgs)
+    except Exception as e:
+        crud.fail_run(run_id)  # брокер недоступен: закрываем прогон, чтобы он не завис в очереди
+        raise HTTPException(503, f"очередь недоступна: {e}")
     return {"run_id": run_id, "n_chunks": len(msgs)}
 
 

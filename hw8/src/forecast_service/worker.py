@@ -26,6 +26,7 @@ def handle(body):
         print(f"chunk {msg['chunk_id']} готов: {out['series_id'].nunique()} рядов", flush=True)
     except Exception as e:
         crud.fail_chunk(msg["chunk_id"], e, WORKER_ID)
+        crud.finalize_run(msg["run_id"])  # если это была последняя пачка, сразу закрыть прогон в PARTIAL
         print(f"chunk {msg['chunk_id']} ошибка: {e}", flush=True)
         raise
 
