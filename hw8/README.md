@@ -16,7 +16,7 @@ docker compose up -d --build
 - REST и Swagger - http://localhost/api/docs
 - панель RabbitMQ - http://localhost:15672 (app / app)
 
-Если порты 80 или 15672 заняты, их можно сдвинуть: `WEB_PORT=8080 RMQ_MGMT_PORT=15680 docker compose up -d --build`.
+Если порты заняты, их можно сдвинуть переменными: `WEB_PORT=8080 RMQ_MGMT_PORT=15680 DB_PORT=5442 docker compose up -d --build`.
 
 ## Что делает планер
 

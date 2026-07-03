@@ -1,3 +1,11 @@
+# Переменные окружения приложения. Значения по умолчанию рассчитаны на сеть compose
+# (хосты db и rabbitmq), поэтому стек поднимается без .env. Файл .env, если он есть,
+# подхватывается compose автоматически и переопределяет эти значения.
+x-app-env: &app-env
+  DB_URL: ${DB_URL:-postgresql+psycopg://postgres:postgres@db:5432/forecast}
+  RABBITMQ_URL: ${RABBITMQ_URL:-amqp://app:app@rabbitmq:5672/}
+  CHUNK_SIZE: ${CHUNK_SIZE:-300}
+
 services:
   db:
     image: postgres:16-alpine
@@ -32,15 +40,16 @@ services:
     image: hw8-api
     build: .
     command: ["python", "-m", "forecast_service.seed"]
-    env_file: .env
+    environment: *app-env
     depends_on:
       db:
         condition: service_healthy
     restart: "no"
 
   api:
+    image: hw8-api
     build: .
-    env_file: .env
+    environment: *app-env
     depends_on:
       db:
         condition: service_healthy
@@ -59,7 +68,7 @@ services:
     image: hw8-api
     build: .
     command: ["python", "-m", "forecast_service.worker"]
-    env_file: .env
+    environment: *app-env
     depends_on:
       db:
         condition: service_healthy
