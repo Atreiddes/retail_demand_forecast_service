@@ -114,6 +114,15 @@ table.grid th {
   user-select: none;
 }
 
+.filter-input {
+  padding: 6px 8px;
+  border: 1px solid #c2c7cc;
+  border-radius: 3px;
+  font-size: 14px;
+  min-width: 280px;
+  margin-top: 8px;
+}
+
 .series-row { cursor: pointer; }
 .series-row:hover { background: #eef5ff; }
 

@@ -7,6 +7,7 @@
     Статус: <span id="status">—</span>
     <span id="meta" class="muted"></span>
   </div>
+  <div id="run-note"></div>
   <div class="progress">
     <div id="progress-bar" class="progress-inner" style="width:0%"></div>
   </div>
@@ -17,6 +18,7 @@
 
 <section id="result" hidden>
   <h2>Ряды</h2>
+  <input type="search" id="catalog-filter" class="filter-input" placeholder="Фильтр по товару или ряду">
   <table class="grid" id="catalog">
     <thead>
       <tr>
@@ -67,6 +69,17 @@ async function poll() {
     const p = pct(r.n_chunks_done, r.n_chunks);
     document.getElementById("progress-bar").style.width = p + "%";
 
+    const note = document.getElementById("run-note");
+    if (r.status === "failed") {
+      note.className = "error";
+      note.textContent = "Прогон завершился с ошибкой: часть пачек не посчиталась, попробуйте запустить заново.";
+    } else if (r.status === "partial") {
+      note.className = "muted";
+      note.textContent = "Результат неполный: часть пачек не посчиталась.";
+    } else {
+      note.textContent = "";
+    }
+
     if (r.status === "completed" || r.status === "partial") {
       clearInterval(pollTimer);
       document.getElementById("progress-bar").style.width = "100%";
@@ -113,9 +126,13 @@ async function loadCatalog() {
 
 function renderCatalog() {
   const med = median(catalogRows.map(relWidth));
+  const q = (document.getElementById("catalog-filter").value || "").toLowerCase();
+  const rows = q
+    ? catalogRows.filter(r => (r.item_id + " " + r.series_id).toLowerCase().includes(q))
+    : catalogRows;
   const tbody = document.querySelector("#catalog tbody");
   tbody.innerHTML = "";
-  for (const row of catalogRows) {
+  for (const row of rows) {
     const tr = document.createElement("tr");
     tr.className = "series-row";
     tr.addEventListener("click", () => loadForecast(row.series_id));
@@ -157,6 +174,8 @@ document.querySelectorAll("#catalog th").forEach(th => {
     renderCatalog();
   });
 });
+
+document.getElementById("catalog-filter").addEventListener("input", renderCatalog);
 
 async function loadForecast(seriesId) {
   const resp = await fetch("/api/runs/" + RUN_ID + "/forecast?series_id=" + encodeURIComponent(seriesId));

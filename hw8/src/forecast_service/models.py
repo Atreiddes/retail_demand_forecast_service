@@ -66,7 +66,6 @@ class ForecastChunk(SQLModel, table=True):
     idx: int
     n_series: int
     status: str = QUEUED
-    attempt: int = 0
     worker_id: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
