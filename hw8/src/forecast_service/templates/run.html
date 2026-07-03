@@ -30,9 +30,11 @@
   </table>
 
   <h2>График ряда</h2>
+  <p class="muted">Верхний ряд строится автоматически. Кликните любой ряд в таблице, чтобы посмотреть его прогноз.</p>
   <div id="chart" class="chart"></div>
 
-  <h2>Метрики</h2>
+  <h2>Качество модели</h2>
+  <p class="muted">Бэктест walk-forward, WRMSSE по 12 уровням иерархии M5. Оценка модели, общая для всех прогонов, а не точность этого прогона.</p>
   <div id="model-version" class="muted"></div>
   <div id="wrmsse"></div>
   <table class="grid" id="metrics">
@@ -82,6 +84,12 @@ async function loadResult() {
   await Promise.all([loadCatalog(), loadMetrics()]);
 }
 
+// относительная ширина интервала = ширина P10-P90 к объёму прогноза: убирает масштаб,
+// подсветка метит предсказуемость спроса, а не крупные ряды
+function relWidth(row) {
+  return row.sum_p50 > 0 ? row.interval_width / row.sum_p50 : 0;
+}
+
 function widthClass(width, median) {
   if (median <= 0) return "";
   if (width <= median * 0.7) return "narrow";
@@ -100,10 +108,11 @@ async function loadCatalog() {
   const resp = await fetch("/api/runs/" + RUN_ID + "/catalog");
   catalogRows = await resp.json();
   renderCatalog();
+  if (catalogRows.length) loadForecast(catalogRows[0].series_id);  // сразу строим график верхнего ряда
 }
 
 function renderCatalog() {
-  const med = median(catalogRows.map(r => r.interval_width));
+  const med = median(catalogRows.map(relWidth));
   const tbody = document.querySelector("#catalog tbody");
   tbody.innerHTML = "";
   for (const row of catalogRows) {
@@ -115,7 +124,7 @@ function renderCatalog() {
       { v: row.series_id, cls: "" },
       { v: row.item_id, cls: "" },
       { v: fmt(row.sum_p50), cls: "" },
-      { v: fmt(row.interval_width), cls: widthClass(row.interval_width, med) }
+      { v: fmt(row.interval_width), cls: widthClass(relWidth(row), med) }
     ];
     for (const c of cells) {
       const td = document.createElement("td");
@@ -155,10 +164,13 @@ async function loadForecast(seriesId) {
 
   const hx = d.history.map(p => p.week);
   const hy = d.history.map(p => p.units);
-  const fx = d.points.map(p => p.week);
-  const p10 = d.points.map(p => p.p10);
-  const p50 = d.points.map(p => p.p50);
-  const p90 = d.points.map(p => p.p90);
+  // прогноз стыкуем с последней фактической точкой, чтобы линия и лента не рвались на границе
+  const anchor = hx.length ? { x: hx[hx.length - 1], y: hy[hy.length - 1] } : null;
+  const join = arr => anchor ? [anchor.y, ...arr] : arr;
+  const fx = anchor ? [anchor.x, ...d.points.map(p => p.week)] : d.points.map(p => p.week);
+  const p10 = join(d.points.map(p => p.p10));
+  const p50 = join(d.points.map(p => p.p50));
+  const p90 = join(d.points.map(p => p.p90));
 
   const traces = [
     {
@@ -170,8 +182,8 @@ async function loadForecast(seriesId) {
       line: { width: 0 }, fill: "tonexty", fillcolor: "rgba(31,119,180,0.2)"
     },
     {
-      x: fx, y: p50, name: "P50", mode: "lines",
-      line: { color: "#1f77b4" }
+      x: fx, y: p50, name: "Прогноз P50", mode: "lines",
+      line: { color: "#1f77b4", width: 2 }
     },
     {
       x: hx, y: hy, name: "История", mode: "lines",
@@ -182,7 +194,12 @@ async function loadForecast(seriesId) {
     title: d.series_id,
     margin: { t: 40, r: 20, b: 40, l: 50 },
     xaxis: { title: "Неделя" },
-    yaxis: { title: "Единицы" }
+    yaxis: { title: "Единицы", rangemode: "tozero" },
+    legend: { orientation: "h" },
+    shapes: anchor ? [{
+      type: "line", x0: anchor.x, x1: anchor.x, yref: "paper", y0: 0, y1: 1,
+      line: { color: "#bbb", width: 1, dash: "dot" }
+    }] : []
   };
   Plotly.newPlot("chart", traces, layout, { responsive: true });
 }

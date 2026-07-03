@@ -5,9 +5,10 @@
 <form id="run-form" class="card">
   <div class="field">
     <label for="store_id">Магазин</label>
-    <select id="store_id" name="store_id" required>
+    <select id="store_id" name="store_id">
+      <option value="">Все магазины</option>
       {% for s in stores %}
-      <option value="{{ s }}">{{ s }}</option>
+      <option value="{{ s }}" {% if loop.first %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
     </select>
   </div>
