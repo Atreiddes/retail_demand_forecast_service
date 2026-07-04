@@ -1,0 +1,14 @@
+{
+  "n_folds": 4,
+  "horizon": 8,
+  "wrmsse12_mean": 0.6129,
+  "wrmsse12_std": 0.0324,
+  "wrmsse9_mean": 0.6744,
+  "wrmsse9_std": 0.0263,
+  "per_fold_wrmsse12": [
+    0.6082,
+    0.5843,
+    0.5999,
+    0.6592
+  ]
+}

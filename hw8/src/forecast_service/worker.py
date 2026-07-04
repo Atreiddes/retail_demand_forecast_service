@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import traceback
 
 from . import crud, mq
 from .forecast import forecast_series, load_artifact
@@ -27,7 +28,7 @@ def handle(body):
     except Exception as e:
         crud.fail_chunk(msg["chunk_id"], e, WORKER_ID)
         crud.finalize_run(msg["run_id"])  # если это была последняя пачка, сразу закрыть прогон в PARTIAL
-        print(f"chunk {msg['chunk_id']} ошибка: {e}", flush=True)
+        print(f"chunk {msg['chunk_id']} ошибка: {e}\n{traceback.format_exc()}", flush=True)
         raise
 
 

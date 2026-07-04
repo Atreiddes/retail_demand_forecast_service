@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import json
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -126,13 +127,12 @@ def forecast(run_id: int, series_id: str = Query(...)):
 @app.get("/api/runs/{run_id}/metrics")
 def metrics(run_id: int):
     art = load_artifact()
-    csv = settings.metrics_dir / "cv_summary_foods.csv"
-    rows, wrmsse = [], art.get("wrmsse")
-    if csv.exists():
-        df = pd.read_csv(csv)
-        rows = df.to_dict("records")
-        wrmsse = round(float(df["value"].mean()), 4)  # общий WRMSSE = среднее по 12 уровням
-    return {"model_version": art["model_version"], "wrmsse": wrmsse, "rows": rows}
+    mdir = settings.metrics_dir
+    rows = pd.read_csv(mdir / "cv_summary_foods.csv").to_dict("records") \
+        if (mdir / "cv_summary_foods.csv").exists() else []
+    summ = mdir / "metrics_summary.json"
+    extra = json.loads(summ.read_text(encoding="utf-8")) if summ.exists() else {}
+    return {"model_version": art["model_version"], "rows": rows, **extra}
 
 
 @app.get("/api/runs/{run_id}/export.csv")

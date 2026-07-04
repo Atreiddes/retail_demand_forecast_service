@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<p><a href="/">&larr; Новый прогон и список</a></p>
 <h1>Прогон {{ run_id }}</h1>
 
 <div class="card">
@@ -36,9 +37,10 @@
   <div id="chart" class="chart"></div>
 
   <h2>Качество модели</h2>
-  <p class="muted">Бэктест walk-forward, WRMSSE по 12 уровням иерархии M5. Оценка модели, общая для всех прогонов, а не точность этого прогона.</p>
+  <p class="muted">Бэктест walk-forward по нескольким окнам, WRMSSE по уровням иерархии M5. Оценка модели, общая для всех прогонов, а не точность этого прогона. WRMSSE меньше 1 - лучше наивного прогноза (повтор прошлой недели), больше 1 - хуже. Зелёный хорошо, красный - на уровне наива или хуже.</p>
   <div id="model-version" class="muted"></div>
   <div id="wrmsse"></div>
+  <div id="wrmsse-note" class="muted" style="font-size:13px;margin-top:4px"></div>
   <table class="grid" id="metrics">
     <thead>
       <tr><th>Уровень</th><th>Значение</th></tr>
@@ -107,6 +109,14 @@ function widthClass(width, median) {
   if (median <= 0) return "";
   if (width <= median * 0.7) return "narrow";
   if (width <= median * 1.3) return "mid";
+  return "wide";
+}
+
+// подсветка WRMSSE уровня: зелёный хорошо, жёлтый средне, красный на уровне наива или хуже
+function wrClass(v) {
+  v = +v;
+  if (v < 0.65) return "narrow";
+  if (v < 0.85) return "mid";
   return "wide";
 }
 
@@ -227,7 +237,12 @@ async function loadMetrics() {
   const resp = await fetch("/api/runs/" + RUN_ID + "/metrics");
   const m = await resp.json();
   document.getElementById("model-version").textContent = "Модель: " + (m.model_version ?? "—");
-  document.getElementById("wrmsse").textContent = "WRMSSE: " + fmt(m.wrmsse);
+  document.getElementById("wrmsse").textContent = (m.wrmsse12_mean != null)
+    ? `WRMSSE: ${fmt(m.wrmsse12_mean)} ± ${fmt(m.wrmsse12_std)} (12 уровней) · ${fmt(m.wrmsse9_mean)} ± ${fmt(m.wrmsse9_std)} (по 9 различимым)`
+    : "WRMSSE: —";
+  document.getElementById("wrmsse-note").textContent = m.n_folds
+    ? `walk-forward, окон: ${m.n_folds}. По 9 различимым уровням оценка не завышена дублями: на срезе одной категории FOODS уровни L4/L6/L8 дублируют L1/L2/L3.`
+    : "";
   const tbody = document.querySelector("#metrics tbody");
   tbody.innerHTML = "";
   for (const row of (m.rows || [])) {
@@ -236,6 +251,7 @@ async function loadMetrics() {
     a.textContent = row.level;
     const b = document.createElement("td");
     b.textContent = fmt(row.value);
+    b.className = wrClass(row.value);
     tr.appendChild(a);
     tr.appendChild(b);
     tbody.appendChild(tr);
