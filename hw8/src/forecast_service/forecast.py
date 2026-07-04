@@ -16,6 +16,7 @@ import pandas as pd
 
 from .config import settings
 from .ml.features import CAT_FEATURES, FEATURES, HMAX, TCOL, build_direct, select_test
+from .ml.schemas import features_schema, forecast_output_schema, validate_sample
 
 QUANTILES = (0.1, 0.9)
 HIST_WEEKS = 78  # хватает на lag_52 + rolling_26
@@ -92,6 +93,7 @@ def forecast_series(history: pd.DataFrame, origin, horizon=HMAX) -> pd.DataFrame
     te = select_test(frame, weeks).copy()
     for c in CAT_FEATURES:
         te[c] = pd.Categorical(te[c].astype(str), categories=art["cats"][c])
+    validate_sample(te, features_schema)  # контроль признаков на входе модели
 
     oos = te["available_days"].to_numpy() == 0
     p50 = np.where(oos, 0.0, np.clip(art["point"].predict(te[FEATURES]), 0, None) * art["factor"])
@@ -102,4 +104,5 @@ def forecast_series(history: pd.DataFrame, origin, horizon=HMAX) -> pd.DataFrame
     out["p10"] = np.minimum(q10, p50).astype("float32")
     out["p50"] = p50.astype("float32")
     out["p90"] = np.maximum(q90, p50).astype("float32")
+    validate_sample(out, forecast_output_schema)  # контроль выхода: без NaN, >= 0, монотонность
     return out

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from pandera.pandas import Check, Column, DataFrameSchema
 
+from .features import TCOL
+
 CATEGORIES = ["FOODS", "HOBBIES", "HOUSEHOLD"]
 STATES = ["CA", "TX", "WI"]
-TCOL = "week_start_date"
 
 # Вход: weekly-панель M5 (то, что hw5 реально читает из hw4).
 weekly_input_schema = DataFrameSchema(
@@ -38,7 +39,8 @@ features_schema = DataFrameSchema(
     {
         "id": Column(str),
         TCOL: Column("datetime64[ns]"),
-        "units": Column(checks=Check.greater_than_or_equal_to(0), coerce=True),
+        # units - цель, а не признак: на прогнозе будущих недель она NaN
+        "units": Column(nullable=True, checks=Check.greater_than_or_equal_to(0), coerce=True),
         "h": Column(checks=Check.in_range(1, 4), coerce=True),
         "is_promo": Column(checks=Check.isin([0, 1]), coerce=True),
         "is_xmas": Column(checks=Check.isin([0, 1]), coerce=True),
@@ -69,6 +71,19 @@ prediction_schema = DataFrameSchema(
             coerce=True,
         ),
     },
+    strict=False,
+)
+
+# Выход модели на прогнозе: series_id + p10/p50/p90 (без NaN, неотрицательные, монотонные).
+forecast_output_schema = DataFrameSchema(
+    {
+        "series_id": Column(str, nullable=False),
+        "p10": Column(nullable=False, checks=Check.greater_than_or_equal_to(0), coerce=True),
+        "p50": Column(nullable=False, checks=Check.greater_than_or_equal_to(0), coerce=True),
+        "p90": Column(nullable=False, checks=Check.greater_than_or_equal_to(0), coerce=True),
+    },
+    checks=Check(lambda d: bool((d["p10"] <= d["p50"]).all() and (d["p50"] <= d["p90"]).all()),
+                 error="нарушена монотонность p10<=p50<=p90"),
     strict=False,
 )
 
