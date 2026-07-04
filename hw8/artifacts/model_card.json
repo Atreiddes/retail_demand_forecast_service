@@ -1,8 +1,8 @@
 {
   "model_version": "foods-2016-05-14",
   "origin": "2016-05-14",
-  "horizon_weeks": 4,
+  "horizon_weeks": 8,
   "use_events": false,
   "lightgbm_version": "4.6.0",
-  "trained_at": "2026-06-27"
+  "trained_at": "2026-07-04"
 }

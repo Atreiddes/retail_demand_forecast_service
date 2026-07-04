@@ -26,7 +26,7 @@ from util import TCOL, TRAIN_CAP
 ART = ROOT / "artifacts"
 DATA = ROOT / "data" / "foods_weekly.parquet"
 QUANTILES = (0.1, 0.9)   # p50 = калиброванная точечная, q0.5 не нужен
-HORIZON = 4
+HORIZON = 8
 
 
 def _train(frame, origin, params, rounds):

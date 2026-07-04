@@ -41,7 +41,7 @@ features_schema = DataFrameSchema(
         TCOL: Column("datetime64[ns]"),
         # units - цель, а не признак: на прогнозе будущих недель она NaN
         "units": Column(nullable=True, checks=Check.greater_than_or_equal_to(0), coerce=True),
-        "h": Column(checks=Check.in_range(1, 4), coerce=True),
+        "h": Column(checks=Check.in_range(1, 8), coerce=True),
         "is_promo": Column(checks=Check.isin([0, 1]), coerce=True),
         "is_xmas": Column(checks=Check.isin([0, 1]), coerce=True),
         "month": Column(checks=Check.in_range(1, 12), coerce=True),

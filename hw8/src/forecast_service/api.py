@@ -46,7 +46,7 @@ app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 class RunRequest(BaseModel):
     store_id: str | None = None
     cat_id: str = "FOODS"
-    horizon_weeks: int = Field(4, ge=1, le=HMAX)
+    horizon_weeks: int = Field(8, ge=1, le=HMAX)
     origin: str | None = None
 
 

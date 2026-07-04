@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 TCOL = "week_start_date"
-HMAX = 4
+HMAX = 8  # горизонт прогноза, недель
 LAGS = [1, 2, 3, 4, 8, 13, 26, 52]   # относительно origin
 ROLL = [4, 8, 13, 26]
 
