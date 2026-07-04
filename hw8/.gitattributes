@@ -1,0 +1,5 @@
+# Артефакт модели и данные - бинарные: без конвертации концов строк.
+# Иначе autocrlf ломает текстовый формат LightGBM (model.txt, квантильные модели).
+artifacts/*.txt binary
+data/*.parquet binary
+src/forecast_service/static/plotly.min.js binary
