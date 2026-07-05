@@ -27,7 +27,15 @@
   <div class="field">
     <label for="origin">Прогноз от даты</label>
     <input type="date" id="origin" name="origin">
-    <div class="muted">По умолчанию последняя доступная неделя.</div>
+    <button type="button" id="origin-latest" class="btn-ghost">Самая актуальная неделя</button>
+    <button type="button" id="origin-test" class="btn-ghost">Тест на прошлом окне</button>
+    <div class="muted">Прогноз строится от самой актуальной недели с фактическими продажами (на демо-данных M5 это май 2016; в рабочей системе - текущая неделя). «Тест на прошлом окне» сдвигает дату на горизонт назад - тогда на графике виден прогноз против факта. Дату можно изменить кликом.</div>
+  </div>
+
+  <div class="field">
+    <label for="api_key">Ключ API</label>
+    <input type="password" id="api_key" autocomplete="off" placeholder="ключ на запуск прогона">
+    <div class="muted">Запуск прогона требует ключ (защита от постороннего запуска). Ключ запоминается в браузере.</div>
   </div>
 
   <button type="submit">Запустить прогон</button>
@@ -46,7 +54,7 @@
   </thead>
   <tbody>
     {% for r in runs %}
-    <tr>
+    <tr class="{% if loop.index > 5 %}extra-run{% endif %}"{% if loop.index > 5 %} style="display:none"{% endif %}>
       <td><a href="/runs/{{ r.id }}">{{ r.id }}</a></td>
       <td>{{ r.store_id }}</td>
       <td>{{ r.status }}</td>
@@ -55,8 +63,50 @@
     {% endfor %}
   </tbody>
 </table>
+{% if runs|length > 5 %}
+<button type="button" id="show-all-runs" class="btn-ghost">Показать все ({{ runs|length }})</button>
+{% endif %}
 
 <script>
+// последняя неделя с данными и горизонт приходят из /health явными полями,
+// строку версии модели не разбираем
+let latestOrigin = null, hmax = 8;
+
+function shiftDays(iso, days) {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+async function initOrigin() {
+  try {
+    const h = await (await fetch("/health")).json();
+    latestOrigin = h.origin || null;
+    hmax = h.hmax || 8;
+    if (latestOrigin) document.getElementById("origin").value = latestOrigin;
+  } catch (e) { /* сеть недоступна - поле пустое, сервер возьмёт последнюю неделю сам */ }
+}
+document.getElementById("origin-latest").addEventListener("click", () => {
+  if (latestOrigin) document.getElementById("origin").value = latestOrigin;
+});
+// тест на прошлом окне: дата на горизонт назад, чтобы у прогноза был факт для сравнения
+document.getElementById("origin-test").addEventListener("click", () => {
+  if (latestOrigin) document.getElementById("origin").value = shiftDays(latestOrigin, -7 * hmax);
+});
+initOrigin();
+
+// ключ API живёт в браузере, чтобы не вводить на каждый запуск
+const keyInput = document.getElementById("api_key");
+keyInput.value = localStorage.getItem("api_key") || "";
+keyInput.addEventListener("input", () => localStorage.setItem("api_key", keyInput.value));
+
+// список прогонов: показываем последние 5, остальные по кнопке
+const showAll = document.getElementById("show-all-runs");
+if (showAll) showAll.addEventListener("click", () => {
+  document.querySelectorAll("tr.extra-run").forEach(tr => { tr.style.display = ""; });
+  showAll.style.display = "none";
+});
+
 document.getElementById("run-form").addEventListener("submit", async function (e) {
   e.preventDefault();
   const err = document.getElementById("form-error");
@@ -73,9 +123,11 @@ document.getElementById("run-form").addEventListener("submit", async function (e
   try {
     const resp = await fetch("/api/runs", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json",
+                 "X-API-Key": document.getElementById("api_key").value },
       body: JSON.stringify(body)
     });
+    if (resp.status === 401) throw new Error("неверный ключ API");
     if (!resp.ok) throw new Error("Сервер вернул " + resp.status);
     const data = await resp.json();
     window.location = "/runs/" + data.run_id;

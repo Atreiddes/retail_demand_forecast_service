@@ -18,23 +18,58 @@
 </div>
 
 <section id="result" hidden>
-  <h2>Ряды</h2>
-  <input type="search" id="catalog-filter" class="filter-input" placeholder="Фильтр по товару или ряду">
-  <table class="grid" id="catalog">
-    <thead>
-      <tr>
-        <th data-key="series_id" data-type="str">Ряд</th>
-        <th data-key="item_id" data-type="str">Товар</th>
-        <th data-key="sum_p50" data-type="num">Сумма P50</th>
-        <th data-key="interval_width" data-type="num">Ширина P10-P90</th>
-      </tr>
-    </thead>
+  <h2>График прогноза</h2>
+  <p class="muted">Показан самый крупный ряд. Кликните любой ряд в таблице ниже, чтобы построить его прогноз.</p>
+  <div id="chart" class="chart"></div>
+  <p class="muted" style="font-size:13px">Линия - прогноз P50 (наиболее вероятный спрос). Затенённая лента - интервал P10-P90: спрос попадёт в него примерно в 80% случаев. Узкая лента - спрос предсказуем, широкая - стоит присмотреться.</p>
+  <details style="margin-top:6px">
+    <summary style="cursor:pointer;font-size:14px">Зачем нужен интервал? (пояснение)</summary>
+    <div class="muted" style="font-size:13px;margin-top:8px;line-height:1.55">
+      <p>Одна средняя цифра не говорит о риске. Интервал показывает разброс, и заказ можно делать под свою цену ошибки:</p>
+      <ul style="margin:6px 0 6px 18px;padding:0">
+        <li>Скоропорт (списывается) - заказывать ближе к нижней границе P10, чтобы не выбрасывать лишнее.</li>
+        <li>Ходовой дефицитный товар - ближе к верхней границе P90, чтобы не терять продажи.</li>
+        <li>Узкий интервал - можно довериться прогнозу; широкий - проверить руками.</li>
+      </ul>
+      <p>Так интервал напрямую помогает не допускать перестока и недостока.</p>
+    </div>
+  </details>
+
+  <h2>Сводка по агрегатам</h2>
+  <p class="muted" style="font-size:13px">Суммарный прогноз P50 за горизонт по уровням: всего, по регионам, магазинам и отделам. Модель прогнозирует на уровне товар-магазин, уровни выше - суммы этих прогнозов снизу вверх. На агрегатах модель точнее всего (см. WRMSSE ниже). Ширина интервала агрегата - сумма интервалов рядов: это верхняя, осторожная оценка неопределённости (реальный разброс суммы уже).</p>
+  <table class="grid" id="summary">
+    <thead><tr><th>Уровень</th><th>Группа</th><th>Сумма P50</th><th>Ширина P10-P90</th></tr></thead>
     <tbody></tbody>
   </table>
 
-  <h2>График ряда</h2>
-  <p class="muted">Верхний ряд строится автоматически. Кликните любой ряд в таблице, чтобы посмотреть его прогноз.</p>
-  <div id="chart" class="chart"></div>
+  <h2>Ряды (детально по товар-магазин)</h2>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+    <select id="f-state" class="filter-input" style="width:auto"><option value="">Все регионы</option></select>
+    <select id="f-store" class="filter-input" style="width:auto"><option value="">Все магазины</option></select>
+    <select id="f-dept" class="filter-input" style="width:auto"><option value="">Все отделы</option></select>
+    <input type="search" id="catalog-filter" class="filter-input" placeholder="Фильтр по товару или ряду" style="flex:1;min-width:180px">
+  </div>
+  <div style="max-height:360px;overflow:auto;border:1px solid var(--line,#e2e4e0);border-radius:8px">
+    <table class="grid" id="catalog">
+      <thead>
+        <tr>
+          <th data-key="series_id" data-type="str">Ряд</th>
+          <th data-key="item_id" data-type="str">Товар</th>
+          <th data-key="sum_p50" data-type="num">Сумма P50 за горизонт</th>
+          <th data-key="interval_width" data-type="num">Ширина P10-P90 за горизонт</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="muted" style="font-size:13px;margin-top:8px;line-height:2">
+    Цвет в столбце «Ширина P10-P90» - относительная ширина интервала (к объёму прогноза), в сравнении с типичной по прогону:
+    <span class="narrow" style="padding:1px 12px;border-radius:3px"></span> уже среднего, спрос предсказуем;
+    <span class="mid" style="padding:1px 12px;border-radius:3px"></span> около среднего;
+    <span class="wide" style="padding:1px 12px;border-radius:3px"></span> заметно шире среднего, волатильно, проверить руками.
+    Порог: зелёный - до 0.7 медианы, жёлтый - до 1.3 медианы, красный - выше.
+  </div>
 
   <h2>Качество модели</h2>
   <p class="muted">Бэктест walk-forward по нескольким окнам, WRMSSE по уровням иерархии M5. Оценка модели, общая для всех прогонов, а не точность этого прогона. WRMSSE меньше 1 - лучше наивного прогноза (повтор прошлой недели), больше 1 - хуже. Зелёный хорошо, красный - на уровне наива или хуже.</p>
@@ -47,6 +82,36 @@
     </thead>
     <tbody></tbody>
   </table>
+
+  <details style="margin-top:14px">
+    <summary style="cursor:pointer;font-size:14px">Что означают уровни L1-L12? (пояснение)</summary>
+    <div class="muted" style="font-size:13px;margin-top:8px;line-height:1.55">
+      <p>Прогноз проверяется на разных уровнях агрегации: сверху общие итоги (их прогнозировать легче), внизу отдельный товар в конкретном магазине (сложнее всего).</p>
+      <ul style="margin:6px 0 6px 18px;padding:0">
+        <li>L1 - всего продаж по всем магазинам и товарам</li>
+        <li>L2 - по штату (региону)</li>
+        <li>L3 - по магазину</li>
+        <li>L4 - по категории (у нас одна FOODS, поэтому совпадает с L1)</li>
+        <li>L5 - по отделу внутри категории</li>
+        <li>L6 - штат по категории (на срезе FOODS совпадает с L2)</li>
+        <li>L7 - штат по отделу</li>
+        <li>L8 - магазин по категории (совпадает с L3)</li>
+        <li>L9 - магазин по отделу</li>
+        <li>L10 - по товару (сумма по всем магазинам)</li>
+        <li>L11 - товар по штату</li>
+        <li>L12 - конкретный товар в конкретном магазине (самый нижний уровень)</li>
+      </ul>
+      <p>Верхние уровни у нас 0.2-0.7 - заметно лучше наива. Нижний L12 около 1: спрос по одному товару в магазине прерывистый, точнее наива предсказать почти нельзя. Поэтому ценность в агрегатах (категория, магазин, регион) и в интервале P10-P90, а не в точечном прогнозе одного SKU.</p>
+    </div>
+  </details>
+
+  <h2>Мониторинг дрейфа данных</h2>
+  <p class="muted" style="font-size:13px" id="drift-note">Оценка дрейфа появится после завершения прогона.</p>
+  <table class="grid" id="drift">
+    <thead><tr><th>Признак</th><th>PSI</th><th>Статус</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p class="muted" style="font-size:13px;margin-top:6px">Дрейф - ранний сигнал по входным данным. Рядом работает метрическая проверка: pandera сверяет вход и выход модели на каждом прогоне, а порог качества при переобучении (WRMSSE &le; 0.75) не пропускает ухудшившуюся модель в эксплуатацию.</p>
 </section>
 
 <script>
@@ -96,7 +161,31 @@ async function poll() {
 
 async function loadResult() {
   document.getElementById("result").hidden = false;
-  await Promise.all([loadCatalog(), loadMetrics()]);
+  await Promise.all([loadCatalog(), loadMetrics(), loadDrift()]);
+}
+
+async function loadDrift() {
+  const resp = await fetch("/api/runs/" + RUN_ID + "/drift");
+  if (!resp.ok) return;
+  const d = await resp.json();
+  const names = { units: "продажи (шт)", sell_price: "цена" };
+  const label = { narrow: "стабильно", mid: "умеренный сдвиг", wide: "сильный дрейф", no_data: "нет данных" };
+  const note = document.getElementById("drift-note");
+  if (note && d.window_weeks) note.textContent =
+    `PSI сравнивает распределение признаков в окне ${d.window_weeks} недель до даты прогноза ` +
+    `с таким же окном год назад по тем же рядам (год-к-году, сезонность не считается дрейфом). ` +
+    `Зелёный - стабильно (PSI < 0.1), жёлтый - умеренный сдвиг (0.1-0.25), красный - сильный дрейф (> 0.25), модель стоит переобучить.`;
+  const tbody = document.querySelector("#drift tbody");
+  tbody.innerHTML = "";
+  for (const r of d.features) {
+    const tr = document.createElement("tr");
+    const a = document.createElement("td"); a.textContent = names[r.feature] || r.feature;
+    const b = document.createElement("td"); b.textContent = fmtM(r.psi);
+    const c = document.createElement("td"); c.textContent = label[r.status] || r.status;
+    if (r.status !== "no_data") c.className = r.status;
+    tr.appendChild(a); tr.appendChild(b); tr.appendChild(c);
+    tbody.appendChild(tr);
+  }
 }
 
 // относительная ширина интервала = ширина P10-P90 к объёму прогноза: убирает масштаб,
@@ -130,16 +219,107 @@ function median(values) {
 async function loadCatalog() {
   const resp = await fetch("/api/runs/" + RUN_ID + "/catalog");
   catalogRows = await resp.json();
+  // сверху крупные ряды: у них интервал P10-P90 широкий и виден на графике,
+  // у мелких прерывистых лента почти нулевая и кажется, что интервала нет
+  catalogRows.sort((a, b) => (b.sum_p50 || 0) - (a.sum_p50 || 0));
+  medRelWidth = median(catalogRows.map(relWidth));  // медиана не зависит от фильтра, считаем один раз
+  populateFilters();
   renderCatalog();
+  buildSummary();
   if (catalogRows.length) loadForecast(catalogRows[0].series_id);  // сразу строим график верхнего ряда
 }
 
+// иерархию (регион/магазин/отдел) отдаёт сервер полями каталога, строку id не разбираем
+function aggBy(keyFn) {
+  const m = new Map();
+  for (const r of catalogRows) {
+    const k = keyFn(r);
+    const o = m.get(k) || { p50: 0, w: 0 };
+    o.p50 += r.sum_p50 || 0;
+    o.w += r.interval_width || 0;
+    m.set(k, o);
+  }
+  return [...m].sort((a, b) => b[1].p50 - a[1].p50);
+}
+
+// сводка: суммарный прогноз по уровням иерархии (всего / регион / магазин / отдел)
+function buildSummary() {
+  const tbody = document.querySelector("#summary tbody");
+  tbody.innerHTML = "";
+  const addRow = (level, group, o, onClick) => {
+    const tr = document.createElement("tr");
+    tr.className = "series-row";
+    tr.addEventListener("click", onClick);
+    for (const v of [level, group, fmt(o.p50), fmt(o.w)]) {
+      const td = document.createElement("td");
+      td.textContent = v;
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  };
+  const tot = catalogRows.reduce((a, r) => ({ p50: a.p50 + (r.sum_p50 || 0), w: a.w + (r.interval_width || 0) }), { p50: 0, w: 0 });
+  addRow("Всего", "все ряды", tot, () => { setFilter({}); loadAgg("Всего", {}); });
+  const stateOf = {};
+  for (const r of catalogRows) stateOf[r.store_id] = r.state_id;
+  const byState = aggBy(r => r.state_id);
+  const byStore = aggBy(r => r.store_id);
+  const byDept = aggBy(r => r.dept_id);
+  if (byState.length > 1) for (const [k, o] of byState)
+    addRow("Регион", k, o, () => { setFilter({ state: k }); loadAgg("Регион " + k, { state: k }); });
+  if (byStore.length > 1) for (const [k, o] of byStore)
+    addRow("Магазин", k, o, () => { setFilter({ state: stateOf[k], store: k }); loadAgg("Магазин " + k, { store: k }); });
+  for (const [k, o] of byDept)
+    addRow("Отдел", k, o, () => { setFilter({ dept: k }); loadAgg("Отдел " + k, { dept: k }); });
+}
+
+// заполнить выпадающие списки фильтров различимыми значениями из каталога
+function fillSelect(id, values) {
+  const sel = document.getElementById(id);
+  const cur = sel.value;
+  const first = sel.options[0];
+  sel.innerHTML = "";
+  sel.appendChild(first);
+  for (const v of values) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    sel.appendChild(o);
+  }
+  // прежнее значение могло исчезнуть из списка (сменили регион) - откат на "все"
+  sel.value = values.includes(cur) ? cur : "";
+}
+
+// магазины зависят от выбранного региона: каскад регион -> магазин
+function refreshStores() {
+  const st = document.getElementById("f-state").value;
+  const stores = [...new Set(catalogRows
+    .filter(r => !st || r.state_id === st)
+    .map(r => r.store_id))].sort();
+  fillSelect("f-store", stores);
+}
+
+function populateFilters() {
+  const uniq = key => [...new Set(catalogRows.map(r => r[key]))].sort();
+  fillSelect("f-state", uniq("state_id"));
+  fillSelect("f-dept", uniq("dept_id"));
+  refreshStores();
+}
+
+let medRelWidth = 0;
+
 function renderCatalog() {
-  const med = median(catalogRows.map(relWidth));
+  const med = medRelWidth;
   const q = (document.getElementById("catalog-filter").value || "").toLowerCase();
-  const rows = q
-    ? catalogRows.filter(r => (r.item_id + " " + r.series_id).toLowerCase().includes(q))
-    : catalogRows;
+  const fState = document.getElementById("f-state").value;
+  const fStore = document.getElementById("f-store").value;
+  const fDept = document.getElementById("f-dept").value;
+  const rows = catalogRows.filter(r => {
+    if (fState && r.state_id !== fState) return false;
+    if (fStore && r.store_id !== fStore) return false;
+    if (fDept && r.dept_id !== fDept) return false;
+    if (q && !(r.item_id + " " + r.series_id).toLowerCase().includes(q)) return false;
+    return true;
+  });
   const tbody = document.querySelector("#catalog tbody");
   tbody.innerHTML = "";
   for (const row of rows) {
@@ -163,9 +343,15 @@ function renderCatalog() {
   }
 }
 
+// объёмы: один знак после запятой; метрики (WRMSSE, PSI): два знака, иначе значения
+// у порогов сливаются и число противоречит цветовой подсветке (данные не режем)
 function fmt(x) {
   if (x === null || x === undefined) return "—";
-  return (typeof x === "number") ? Math.round(x * 100) / 100 : x;
+  return (typeof x === "number") ? Math.round(x * 10) / 10 : x;
+}
+function fmtM(x) {
+  if (x === null || x === undefined) return "—";
+  return (typeof x === "number") ? (Math.round(x * 100) / 100).toFixed(2) : x;
 }
 
 document.querySelectorAll("#catalog th").forEach(th => {
@@ -185,52 +371,88 @@ document.querySelectorAll("#catalog th").forEach(th => {
   });
 });
 
-document.getElementById("catalog-filter").addEventListener("input", renderCatalog);
+// перерисовка каталога не на каждый символ, а после паузы ввода
+let filterTimer = null;
+document.getElementById("catalog-filter").addEventListener("input", () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(renderCatalog, 150);
+});
+document.getElementById("f-state").addEventListener("change", () => { refreshStores(); renderCatalog(); });
+document.getElementById("f-store").addEventListener("change", renderCatalog);
+document.getElementById("f-dept").addEventListener("change", renderCatalog);
 
-async function loadForecast(seriesId) {
-  const resp = await fetch("/api/runs/" + RUN_ID + "/forecast?series_id=" + encodeURIComponent(seriesId));
-  const d = await resp.json();
+// единая функция отрисовки графика: история (контекст), лента P10-P90, P50, факт на
+// прогнозном окне (валидация), вертикальные пунктиры начала прогноза и конца теста
+function drawChart(title, histRows, pointRows) {
+  const fStart = pointRows.length ? pointRows[0].week : null;
+  const fEnd = pointRows.length ? pointRows[pointRows.length - 1].week : null;
 
-  const hx = d.history.map(p => p.week);
-  const hy = d.history.map(p => p.units);
+  const ctx = histRows.filter(p => !fStart || p.week < fStart).slice(-30);   // недавняя история до прогноза
+  const actual = histRows.filter(p => fStart && p.week >= fStart && p.week <= fEnd);  // факт на окне = тест
+
+  const cx = ctx.map(p => p.week), cy = ctx.map(p => p.units);
   // прогноз стыкуем с последней фактической точкой, чтобы линия и лента не рвались на границе
-  const anchor = hx.length ? { x: hx[hx.length - 1], y: hy[hy.length - 1] } : null;
+  const anchor = cx.length ? { x: cx[cx.length - 1], y: cy[cy.length - 1] } : null;
   const join = arr => anchor ? [anchor.y, ...arr] : arr;
-  const fx = anchor ? [anchor.x, ...d.points.map(p => p.week)] : d.points.map(p => p.week);
-  const p10 = join(d.points.map(p => p.p10));
-  const p50 = join(d.points.map(p => p.p50));
-  const p90 = join(d.points.map(p => p.p90));
+  const fx = anchor ? [anchor.x, ...pointRows.map(p => p.week)] : pointRows.map(p => p.week);
 
   const traces = [
-    {
-      x: fx, y: p10, name: "P10", mode: "lines",
-      line: { width: 0 }, showlegend: false, hoverinfo: "skip"
-    },
-    {
-      x: fx, y: p90, name: "P10-P90", mode: "lines",
-      line: { width: 0 }, fill: "tonexty", fillcolor: "rgba(31,119,180,0.2)"
-    },
-    {
-      x: fx, y: p50, name: "Прогноз P50", mode: "lines",
-      line: { color: "#1f77b4", width: 2 }
-    },
-    {
-      x: hx, y: hy, name: "История", mode: "lines",
-      line: { color: "#555" }
-    }
+    { x: fx, y: join(pointRows.map(p => p.p10)), mode: "lines", line: { width: 0 }, showlegend: false, hoverinfo: "skip" },
+    { x: fx, y: join(pointRows.map(p => p.p90)), name: "P10-P90", mode: "lines", line: { width: 0 }, fill: "tonexty", fillcolor: "rgba(31,119,180,0.2)" },
+    { x: fx, y: join(pointRows.map(p => p.p50)), name: "Прогноз P50", mode: "lines", line: { color: "#1f77b4", width: 2 } },
+    { x: cx, y: cy, name: "История", mode: "lines", line: { color: "#555" } }
   ];
-  const layout = {
-    title: d.series_id,
-    margin: { t: 40, r: 20, b: 40, l: 50 },
+  if (actual.length) {
+    const ax = anchor ? [anchor.x, ...actual.map(p => p.week)] : actual.map(p => p.week);
+    const ay = anchor ? [anchor.y, ...actual.map(p => p.units)] : actual.map(p => p.units);
+    traces.push({ x: ax, y: ay, name: "Факт (тест)", mode: "lines", line: { color: "#d95f02", width: 2 } });
+  }
+
+  const vline = x => ({ type: "line", x0: x, x1: x, yref: "paper", y0: 0, y1: 1, line: { color: "#999", width: 1, dash: "dot" } });
+  const shapes = [], anns = [];
+  if (fStart) {
+    shapes.push(vline(fStart));
+    anns.push({ x: fStart, yref: "paper", y: 1.03, text: "начало прогноза", showarrow: false, font: { size: 11, color: "#777" }, xanchor: "left" });
+  }
+  if (fEnd && actual.length) {
+    shapes.push(vline(fEnd));
+    anns.push({ x: fEnd, yref: "paper", y: 1.03, text: "конец теста", showarrow: false, font: { size: 11, color: "#777" }, xanchor: "right" });
+  }
+
+  Plotly.newPlot("chart", traces, {
+    title: title,
+    margin: { t: 52, r: 20, b: 40, l: 55 },
     xaxis: { title: "Неделя" },
     yaxis: { title: "Единицы", rangemode: "tozero" },
     legend: { orientation: "h" },
-    shapes: anchor ? [{
-      type: "line", x0: anchor.x, x1: anchor.x, yref: "paper", y0: 0, y1: 1,
-      line: { color: "#bbb", width: 1, dash: "dot" }
-    }] : []
-  };
-  Plotly.newPlot("chart", traces, layout, { responsive: true });
+    shapes: shapes,
+    annotations: anns
+  }, { responsive: true });
+}
+
+async function loadForecast(seriesId) {
+  const resp = await fetch("/api/runs/" + RUN_ID + "/forecast?series_id=" + encodeURIComponent(seriesId));
+  if (!resp.ok) return;
+  const d = await resp.json();
+  drawChart(d.series_id, d.history, d.points);
+}
+
+// агрегатный график по срезу иерархии (штат / магазин / отдел)
+async function loadAgg(title, params) {
+  const qs = new URLSearchParams(params).toString();
+  const resp = await fetch("/api/runs/" + RUN_ID + "/forecast_agg" + (qs ? "?" + qs : ""));
+  if (!resp.ok) return;
+  const d = await resp.json();
+  drawChart(title, d.history, d.points);
+}
+
+// выставить фильтры каталога под выбранный уровень воронки
+function setFilter(f) {
+  document.getElementById("f-state").value = f.state || "";
+  refreshStores();
+  document.getElementById("f-store").value = f.store || "";
+  document.getElementById("f-dept").value = f.dept || "";
+  renderCatalog();
 }
 
 async function loadMetrics() {
@@ -238,7 +460,7 @@ async function loadMetrics() {
   const m = await resp.json();
   document.getElementById("model-version").textContent = "Модель: " + (m.model_version ?? "—");
   document.getElementById("wrmsse").textContent = (m.wrmsse12_mean != null)
-    ? `WRMSSE: ${fmt(m.wrmsse12_mean)} ± ${fmt(m.wrmsse12_std)} (12 уровней) · ${fmt(m.wrmsse9_mean)} ± ${fmt(m.wrmsse9_std)} (по 9 различимым)`
+    ? `WRMSSE: ${fmtM(m.wrmsse12_mean)} ± ${fmtM(m.wrmsse12_std)} (12 уровней) · ${fmtM(m.wrmsse9_mean)} ± ${fmtM(m.wrmsse9_std)} (по 9 различимым)`
     : "WRMSSE: —";
   document.getElementById("wrmsse-note").textContent = m.n_folds
     ? `walk-forward, окон: ${m.n_folds}. По 9 различимым уровням оценка не завышена дублями: на срезе одной категории FOODS уровни L4/L6/L8 дублируют L1/L2/L3.`
@@ -250,7 +472,7 @@ async function loadMetrics() {
     const a = document.createElement("td");
     a.textContent = row.level;
     const b = document.createElement("td");
-    b.textContent = fmt(row.value);
+    b.textContent = fmtM(row.value);
     b.className = wrClass(row.value);
     tr.appendChild(a);
     tr.appendChild(b);
