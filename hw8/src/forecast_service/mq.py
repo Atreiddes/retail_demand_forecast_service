@@ -1,7 +1,9 @@
 """RabbitMQ через pika: публикация пачек и потребление воркером.
 
-Одна durable-очередь forecast_chunks. Публикация открывает короткое соединение (не делим
-канал между потоками api). Воркер потребляет с prefetch=1 и ручным подтверждением.
+Одна durable-очередь с приоритетами: мелкие интерактивные прогоны (один магазин) идут с
+высоким приоритетом и не ждут за крупным прогоном по всем магазинам. Публикация пачек
+прогона транзакционная: либо в очереди все пачки, либо ни одной (обрыв на середине не
+оставляет полупрогон). Воркер потребляет с prefetch=1 и ручным подтверждением.
 """
 from __future__ import annotations
 
@@ -12,7 +14,8 @@ import pika
 
 from .config import settings
 
-QUEUE = "forecast_chunks"
+QUEUE = "forecast_chunks.v2"  # новое имя: у старой очереди нет аргумента приоритета
+QUEUE_ARGS = {"x-max-priority": 5}
 
 
 def connect(attempts=15):
@@ -25,14 +28,16 @@ def connect(attempts=15):
     raise RuntimeError("RabbitMQ недоступен")
 
 
-def publish(messages):
+def publish(messages, priority=1):
     conn = connect(attempts=3)  # в пути HTTP-запроса не висим долго: быстрый отказ -> 503
     try:
         ch = conn.channel()
-        ch.queue_declare(queue=QUEUE, durable=True)
+        ch.queue_declare(queue=QUEUE, durable=True, arguments=QUEUE_ARGS)
+        ch.tx_select()  # транзакция: пачки прогона попадают в очередь все разом или никак
         for m in messages:
             ch.basic_publish("", QUEUE, json.dumps(m),
-                             properties=pika.BasicProperties(delivery_mode=2))
+                             properties=pika.BasicProperties(delivery_mode=2, priority=priority))
+        ch.tx_commit()
     finally:
         conn.close()
 
@@ -40,7 +45,7 @@ def publish(messages):
 def consume(handle):
     conn = connect()
     ch = conn.channel()
-    ch.queue_declare(queue=QUEUE, durable=True)
+    ch.queue_declare(queue=QUEUE, durable=True, arguments=QUEUE_ARGS)
     ch.basic_qos(prefetch_count=1)
 
     def on_msg(c, method, props, body):

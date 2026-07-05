@@ -20,13 +20,18 @@ from .ml.schemas import features_schema, forecast_output_schema, validate_sample
 
 QUANTILES = (0.1, 0.9)
 HIST_WEEKS = 78  # хватает на lag_52 + rolling_26
+OUT_COLS = ["series_id", TCOL, "h", "p10", "p50", "p90"]  # контракт выхода, один на все пути
 
 _ART: dict = {}
 _CAL: dict = {}
 
 
 def load_artifact():
-    if _ART:
+    # перезагрузка при обновлении файла модели: переобучение (Airflow) кладёт новый артефакт
+    # в примонтированный каталог, воркеры подхватывают его без рестарта
+    model_path = settings.artifact_dir / "model.txt"
+    mtime = model_path.stat().st_mtime if model_path.exists() else None
+    if _ART and _ART.get("_mtime") == mtime:
         return _ART
     d = settings.artifact_dir
     # собираем в локальный словарь и публикуем в кэш только после полной успешной загрузки:
@@ -43,6 +48,8 @@ def load_artifact():
     feat = json.loads((d / "features.json").read_text(encoding="utf-8"))["feature_name"]
     if not (feat == art["point"].feature_name() == FEATURES):
         raise RuntimeError("признаки артефакта не совпадают с моделью")
+    art["_mtime"] = mtime
+    _ART.clear()
     _ART.update(art)
     return _ART
 
@@ -91,6 +98,10 @@ def forecast_series(history: pd.DataFrame, origin, horizon=HMAX) -> pd.DataFrame
     frame = build_direct(panel)
     weeks = [origin + timedelta(weeks=h) for h in range(1, horizon + 1)]
     te = select_test(frame, weeks).copy()
+    if te.empty:
+        # в пачке нет рядов с историей до origin: возвращаем пусто, иначе LightGBM
+        # падает на нулевом входе и роняет всю пачку
+        return pd.DataFrame(columns=OUT_COLS)
     for c in CAT_FEATURES:
         te[c] = pd.Categorical(te[c].astype(str), categories=art["cats"][c])
     validate_sample(te, features_schema)  # контроль признаков на входе модели

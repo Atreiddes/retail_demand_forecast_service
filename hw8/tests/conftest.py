@@ -14,12 +14,14 @@ def schema():
 @pytest.fixture
 def published(monkeypatch):
     msgs = []
-    monkeypatch.setattr(mq, "publish", lambda m: msgs.extend(m))
+    monkeypatch.setattr(mq, "publish", lambda m, priority=1: msgs.extend(m))
     return msgs
 
 
 @pytest.fixture
 def client():
     from forecast_service.api import app
-    with TestClient(app) as c:
+    from forecast_service.config import settings
+    # запуск прогона закрыт ключом: тестовый клиент ходит с ключом по умолчанию
+    with TestClient(app, headers={"X-API-Key": settings.api_key}) as c:
         yield c

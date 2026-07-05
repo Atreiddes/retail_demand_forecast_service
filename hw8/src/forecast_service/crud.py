@@ -66,6 +66,9 @@ def read_history(series_ids, origin):
         df = pd.read_sql_query(sql, conn, params={
             "ids": list(series_ids), "origin": pd.Timestamp(origin).date(), "lo": lo})
     df["week_start_date"] = pd.to_datetime(df["week_start_date"])
+    # нормализация типа на границе: пайплайн и контракты pandera обучены на pyarrow-строках
+    # из parquet, а из Postgres id приходит object - приводим здесь, контракт остаётся строгим
+    df["id"] = df["id"].astype("string[pyarrow]")
     return df
 
 
@@ -170,23 +173,105 @@ def recent_runs(limit=15):
 
 
 def catalog(run_id):
-    sql = """SELECT p.series_id, s.item_id, sum(p.p50) AS sum_p50, avg(p.p90 - p.p10) AS interval_width
+    # ширина интервала суммируется за горизонт (как и P50), чтобы колонки были в одном масштабе
+    sql = """SELECT p.series_id, s.item_id, s.dept_id, s.store_id, s.state_id,
+                    sum(p.p50) AS sum_p50, sum(p.p90 - p.p10) AS interval_width
              FROM forecast_point p JOIN series s ON s.id = p.series_id
-             WHERE p.run_id = %(rid)s GROUP BY p.series_id, s.item_id ORDER BY sum_p50 DESC"""
+             WHERE p.run_id = %(rid)s
+             GROUP BY p.series_id, s.item_id, s.dept_id, s.store_id, s.state_id
+             ORDER BY sum_p50 DESC"""
     return pd.read_sql_query(sql, engine, params={"rid": run_id}).round(2)
 
 
 def series_forecast(run_id, series_id):
-    """Точки прогноза ряда и его недавняя история (полные недели) для графика."""
+    """Точки прогноза ряда и его история вокруг окна прогноза (полные недели) для графика:
+    контекст до начала прогноза плюс факт на прогнозных неделях, если он уже есть."""
     pts = pd.read_sql_query(
         "SELECT week_start_date, h, p10, p50, p90 FROM forecast_point "
         "WHERE run_id = %(rid)s AND series_id = %(sid)s ORDER BY h",
         engine, params={"rid": run_id, "sid": series_id})
+    hi = pts["week_start_date"].max() if len(pts) else None
     hist = pd.read_sql_query(
         "SELECT week_start_date, units FROM sales_history "
-        "WHERE series_id = %(sid)s AND n_days = 7 ORDER BY week_start_date DESC LIMIT 30",
-        engine, params={"sid": series_id}).iloc[::-1]
+        "WHERE series_id = %(sid)s AND n_days = 7 AND (%(hi)s IS NULL OR week_start_date <= %(hi)s) "
+        "ORDER BY week_start_date DESC LIMIT 40",
+        engine, params={"sid": series_id, "hi": hi}).iloc[::-1]
     return pts, hist
+
+
+def agg_forecast(run_id, state=None, store=None, dept=None):
+    """Суммарный прогноз (p10/p50/p90 по неделям) по срезу иерархии штат/магазин/отдел плюс
+    суммарная история того же среза (для графика и факта на прогнозных неделях)."""
+    conds, params = ["p.run_id = %(rid)s"], {"rid": run_id}
+    for col, val, key in [("s.state_id", state, "state"),
+                          ("s.store_id", store, "store"),
+                          ("s.dept_id", dept, "dept")]:
+        if val:
+            conds.append(f"{col} = %({key})s")
+            params[key] = val
+    where = " AND ".join(conds)
+    pts = pd.read_sql_query(
+        f"""SELECT p.week_start_date, sum(p.p10) AS p10, sum(p.p50) AS p50, sum(p.p90) AS p90
+            FROM forecast_point p JOIN series s ON s.id = p.series_id
+            WHERE {where} GROUP BY p.week_start_date ORDER BY p.week_start_date""",
+        engine, params=params)
+    # история агрегата нужна графику только как контекст и факт на окне теста:
+    # ограничиваем её последним годом, чтобы не суммировать всю таблицу
+    lo = (pd.Timestamp(pts["week_start_date"].min()) - pd.Timedelta(weeks=60)).date() \
+        if len(pts) else None
+    hist = pd.read_sql_query(
+        f"""SELECT h.week_start_date, sum(h.units) AS units
+            FROM sales_history h
+            WHERE h.n_days = 7 AND h.week_start_date > %(lo)s AND h.series_id IN (
+                SELECT p.series_id FROM forecast_point p JOIN series s ON s.id = p.series_id
+                WHERE {where})
+            GROUP BY h.week_start_date ORDER BY h.week_start_date""",
+        engine, params={**params, "lo": lo}) if lo else pd.DataFrame(columns=["week_start_date", "units"])
+    return pts, hist
+
+
+DRIFT_WEEKS = 13  # окно оценки дрейфа; единственное место, где задаётся
+
+
+def drift_windows(run_id, weeks=DRIFT_WEEKS):
+    """Два окна признаков для оценки дрейфа: текущее (N недель до origin) и такое же
+    год назад. Сравнение год-к-году снимает сезонность: сдвиг сезона не считается дрейфом."""
+    with Session(engine) as s:
+        run = s.get(models.ForecastRun, run_id)
+        if run is None:
+            return pd.DataFrame(), pd.DataFrame()
+        origin = run.origin
+
+    def window(hi):
+        lo = (pd.Timestamp(hi) - pd.Timedelta(weeks=weeks)).date()
+        sql = text("""
+            SELECT h.units, h.sell_price
+            FROM sales_history h
+            WHERE h.n_days = 7 AND h.week_start_date <= :hi AND h.week_start_date > :lo
+              AND h.series_id IN (SELECT DISTINCT series_id FROM forecast_point WHERE run_id = :rid)
+        """)
+        with engine.connect() as conn:
+            return pd.read_sql_query(sql, conn, params={
+                "hi": pd.Timestamp(hi).date(), "lo": lo, "rid": run_id})
+
+    cur = window(origin)
+    ref = window(pd.Timestamp(origin) - pd.Timedelta(weeks=52))
+    return cur, ref
+
+
+def fail_stale_chunks(minutes=15):
+    """Пачки, зависшие в processing дольше таймаута (жёсткая смерть воркера), помечаются
+    failed, затронутые прогоны финализируются. Вызывается фоновой задачей api."""
+    with Session(engine) as s:
+        rows = s.execute(text(
+            "UPDATE forecast_chunk SET status='failed', finished_at=now(), "
+            "error='таймаут обработки: воркер не завершил пачку' "
+            "WHERE status='processing' AND started_at < now() - make_interval(mins => :m) "
+            "RETURNING run_id"), {"m": minutes}).fetchall()
+        s.commit()
+    for (rid,) in set(rows):
+        finalize_run(rid)
+    return len(rows)
 
 
 def export_rows(run_id):

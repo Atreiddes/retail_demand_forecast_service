@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import date
@@ -23,7 +24,10 @@ import model_lgb as LGB
 import util as U
 from util import TCOL, TRAIN_CAP
 
-ART = ROOT / "artifacts"
+# каталог сборки переопределяется окружением: переобучение по расписанию собирает
+# в artifacts_staging и промоутит в artifacts только после порога качества,
+# чтобы воркеры не подхватили непроверенную модель
+ART = Path(os.environ.get("ARTIFACT_DIR", ROOT / "artifacts"))
 DATA = ROOT / "data" / "foods_weekly.parquet"
 QUANTILES = (0.1, 0.9)   # p50 = калиброванная точечная, q0.5 не нужен
 HORIZON = 8

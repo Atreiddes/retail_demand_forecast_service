@@ -1,0 +1,40 @@
+# CI сервиса hw8: тесты критического пути на живом Postgres.
+# Данные и артефакт модели лежат в репозитории, поэтому прогон полностью автономен.
+name: hw8-ci
+
+on:
+  push:
+    paths: ["hw8/**", ".github/workflows/hw8-ci.yml"]
+  pull_request:
+    paths: ["hw8/**"]
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hw8
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: forecast
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_URL: postgresql+psycopg://postgres:postgres@localhost:5432/forecast
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Зависимости
+        run: uv sync --locked
+      - name: Наполнение БД
+        run: uv run python -m forecast_service.seed
+      - name: Тесты
+        run: uv run pytest -q

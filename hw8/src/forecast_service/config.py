@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     metrics_dir: Path = ROOT / "metrics"
 
     chunk_size: int = 300
+    api_key: str = "demo-key"  # ключ на запуск прогона; в развёртывании задаётся через окружение
 
 
 settings = Settings()

@@ -5,6 +5,13 @@ x-app-env: &app-env
   DB_URL: ${DB_URL:-postgresql+psycopg://postgres:postgres@db:5432/forecast}
   RABBITMQ_URL: ${RABBITMQ_URL:-amqp://app:app@rabbitmq:5672/}
   CHUNK_SIZE: ${CHUNK_SIZE:-300}
+  API_KEY: ${API_KEY:-demo-key}
+
+# Артефакт модели и метрики примонтированы с хоста: переобучение (Airflow) кладёт новые
+# файлы в эти каталоги, воркеры подхватывают модель по mtime без пересборки образа.
+x-app-volumes: &app-volumes
+  - ./artifacts:/app/artifacts:ro
+  - ./metrics:/app/metrics:ro
 
 services:
   db:
@@ -50,6 +57,7 @@ services:
     image: hw8-api
     build: .
     environment: *app-env
+    volumes: *app-volumes
     depends_on:
       db:
         condition: service_healthy
@@ -69,6 +77,10 @@ services:
     build: .
     command: ["python", "-m", "forecast_service.worker"]
     environment: *app-env
+    volumes: *app-volumes
+    # лимиты: крупный прогон по всем магазинам не должен забирать всю машину
+    cpus: 3
+    mem_limit: 4g
     depends_on:
       db:
         condition: service_healthy

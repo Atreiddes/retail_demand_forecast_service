@@ -39,6 +39,12 @@ def test_unknown_run_404(client):
     assert client.get("/api/runs/999999").status_code == 404
 
 
+def test_create_requires_api_key(client, published):
+    r = client.post("/api/runs", json={"store_id": "TX_2", "cat_id": "FOODS"},
+                    headers={"X-API-Key": "wrong"})
+    assert r.status_code == 401 and not published
+
+
 def test_create_process_finalize(client, published):
     r = client.post("/api/runs", json={"store_id": "TX_2", "cat_id": "FOODS"})
     assert r.status_code == 202
@@ -96,7 +102,7 @@ def test_worker_handle_failure_marks_partial(client, published, monkeypatch):
 
 def test_publish_failure_marks_run_failed(client, monkeypatch):
     """Брокер недоступен: POST отдаёт 503, а прогон помечается failed, не виснет в queued."""
-    def boom(msgs):
+    def boom(msgs, priority=1):
         raise RuntimeError("broker down")
 
     monkeypatch.setattr(mq, "publish", boom)

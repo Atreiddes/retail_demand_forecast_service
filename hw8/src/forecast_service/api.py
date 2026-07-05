@@ -6,14 +6,17 @@
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from contextlib import asynccontextmanager
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,6 +32,19 @@ HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 
 
+async def _reap_stale():
+    """Фоновая задача: пачки, зависшие в processing после жёсткой смерти воркера,
+    по таймауту помечаются failed, прогоны финализируются."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            n = await asyncio.to_thread(crud.fail_stale_chunks)
+            if n:
+                print(f"закрыто зависших пачек: {n}", flush=True)
+        except Exception as e:
+            print("проверка зависших пачек:", e, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
     create_db()
@@ -37,7 +53,9 @@ async def lifespan(app):
     except Exception as e:
         print("артефакт не загружен:", e, flush=True)
     crud.reconcile()
+    reaper = asyncio.create_task(_reap_stale())
     yield
+    reaper.cancel()
 
 
 app = FastAPI(title="Прогноз спроса", docs_url="/api/docs", lifespan=lifespan)
@@ -54,7 +72,7 @@ class RunRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     return templates.TemplateResponse(request, "index.html",
-                                      {"stores": crud.stores(), "runs": crud.recent_runs()})
+                                      {"stores": crud.stores(), "runs": crud.recent_runs(100)})
 
 
 @app.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -68,11 +86,16 @@ def health():
         art = load_artifact()
     except Exception as e:
         return JSONResponse({"status": "degraded", "model_loaded": False, "error": str(e)}, status_code=503)
-    return {"status": "ok", "model_version": art["model_version"], "model_loaded": True}
+    # origin и hmax отдаём явно: интерфейс подставляет дату и окно теста из этих полей,
+    # а не разбирает строку версии
+    return {"status": "ok", "model_version": art["model_version"], "model_loaded": True,
+            "origin": str(art["origin"].date()), "hmax": HMAX}
 
 
 @app.post("/api/runs", status_code=202)
-def create_run(req: RunRequest):
+def create_run(req: RunRequest, x_api_key: str | None = Header(None, alias="X-API-Key")):
+    if x_api_key != settings.api_key:
+        raise HTTPException(401, "нет доступа: неверный ключ API")
     art = load_artifact()
     try:
         origin = date.fromisoformat(req.origin) if req.origin else art["origin"].date()
@@ -81,7 +104,8 @@ def create_run(req: RunRequest):
     except ValueError as e:
         raise HTTPException(422, str(e))
     try:
-        mq.publish(msgs)
+        # мелкий прогон (один магазин) идёт с высоким приоритетом и не ждёт за крупным
+        mq.publish(msgs, priority=5 if req.store_id else 1)
     except Exception as e:
         crud.fail_run(run_id)  # брокер недоступен: закрываем прогон, чтобы он не завис в очереди
         raise HTTPException(503, f"очередь недоступна: {e}")
@@ -108,20 +132,30 @@ def catalog(run_id: int):
     return crud.catalog(run_id).to_dict("records")
 
 
+def _chart_payload(pts, hist):
+    """Единый формат ответа для графика: колонка week как строка, значения округлены."""
+    def fmt(d):
+        d = d.copy()
+        d["week_start_date"] = pd.to_datetime(d["week_start_date"]).dt.strftime("%Y-%m-%d")
+        return d.rename(columns={"week_start_date": "week"}).round(2).to_dict("records")
+    return {"points": fmt(pts), "history": fmt(hist)}
+
+
 @app.get("/api/runs/{run_id}/forecast")
 def forecast(run_id: int, series_id: str = Query(...)):
     pts, hist = crud.series_forecast(run_id, series_id)
     if pts.empty:
         raise HTTPException(404, "нет прогноза по ряду")
+    return {"series_id": series_id, **_chart_payload(pts, hist)}
 
-    def fmt(d):
-        return pd.to_datetime(d["week_start_date"]).dt.strftime("%Y-%m-%d")
 
-    pts["week_start_date"] = fmt(pts)
-    hist["week_start_date"] = fmt(hist)
-    return {"series_id": series_id,
-            "history": hist.rename(columns={"week_start_date": "week"}).to_dict("records"),
-            "points": pts.rename(columns={"week_start_date": "week"}).round(2).to_dict("records")}
+@app.get("/api/runs/{run_id}/forecast_agg")
+def forecast_agg(run_id: int, state: str | None = None,
+                 store: str | None = None, dept: str | None = None):
+    pts, hist = crud.agg_forecast(run_id, state, store, dept)
+    if pts.empty:
+        raise HTTPException(404, "нет прогноза по срезу")
+    return _chart_payload(pts, hist)
 
 
 @app.get("/api/runs/{run_id}/metrics")
@@ -133,6 +167,50 @@ def metrics(run_id: int):
     summ = mdir / "metrics_summary.json"
     extra = json.loads(summ.read_text(encoding="utf-8")) if summ.exists() else {}
     return {"model_version": art["model_version"], "rows": rows, **extra}
+
+
+def _psi(ref_prop, cur_prop):
+    """Population Stability Index: насколько текущее распределение отклонилось от эталона."""
+    eps = 1e-6
+    r = np.asarray(ref_prop, dtype=float) + eps
+    c = np.asarray(cur_prop, dtype=float) + eps
+    return float(np.sum((c - r) * np.log(c / r)))
+
+
+@lru_cache(maxsize=256)
+def _drift_cached(run_id: int):
+    """PSI признаков: текущее окно против того же окна год назад по тем же рядам.
+    Сравнение год-к-году снимает сезонность. Для завершённого прогона результат
+    неизменен, поэтому кэшируется."""
+    cur, ref = crud.drift_windows(run_id, weeks=crud.DRIFT_WEEKS)
+    if cur.empty or ref.empty:
+        return None
+    out = []
+    for feat in cur.columns:
+        r = ref[feat].dropna().to_numpy(dtype=float)
+        c = cur[feat].dropna().to_numpy(dtype=float)
+        if r.size == 0 or c.size == 0:
+            out.append({"feature": feat, "psi": None, "status": "no_data"})
+            continue
+        edges = np.unique(np.quantile(r, np.linspace(0, 1, 11)))
+        if edges.size < 2:
+            out.append({"feature": feat, "psi": None, "status": "no_data"})
+            continue
+        edges[0], edges[-1] = -np.inf, np.inf
+        ref_prop = np.histogram(r, bins=edges)[0] / r.size
+        cur_prop = np.histogram(c, bins=edges)[0] / c.size
+        p = _psi(ref_prop, cur_prop)
+        status = "narrow" if p < 0.1 else ("mid" if p < 0.25 else "wide")
+        out.append({"feature": feat, "psi": round(p, 3), "status": status})
+    return {"features": out, "window_weeks": crud.DRIFT_WEEKS}
+
+
+@app.get("/api/runs/{run_id}/drift")
+def drift(run_id: int):
+    res = _drift_cached(run_id)
+    if res is None:
+        raise HTTPException(404, "нет данных для оценки дрейфа")
+    return res
 
 
 @app.get("/api/runs/{run_id}/export.csv")

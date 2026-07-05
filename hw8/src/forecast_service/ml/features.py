@@ -44,7 +44,10 @@ def _target_week_features(df):
     df["woy_cos"] = np.cos(2 * np.pi * woy / 52.0).astype("float32")
     df["month"] = df[TCOL].dt.month.astype("int8")
     df["is_xmas"] = woy.isin([51, 52, 1]).astype("int8")
-    first = df["id"].map(df[df["units"] > 0].groupby("id", observed=True)[TCOL].min())
+    # неделя первой продажи по ряду; map по словарю безопасен и для пустого словаря
+    # (ряды без продаж получают NaT -> age_weeks = 0), в отличие от map по datetime-Series
+    first_by_id = df.loc[df["units"] > 0].groupby("id", observed=True)[TCOL].min().to_dict()
+    first = pd.to_datetime(df["id"].map(first_by_id))
     df["age_weeks"] = ((df[TCOL] - first).dt.days // 7).clip(lower=0).fillna(0).astype("int16")
     return df
 
