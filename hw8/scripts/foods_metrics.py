@@ -40,13 +40,19 @@ def main():
     rows = []
     for fi, fold in enumerate(folds, 1):
         pred, _, _ = U.calibrate_and_predict(frame, fold, {"num_threads": 4}, 400)
+        train = full[full[TCOL] <= fold["origin"]]
         test = full[full[TCOL].isin(fold["test_w"])]
-        lv = M.Scorer(full[full[TCOL] <= fold["origin"]]).score(test, pred)["_levels"]
+        scorer = M.Scorer(train)
+        lv = scorer.score(test, pred)["_levels"]
         wr12 = sum(lv.values()) / len(lv)
         wr9 = sum(lv[k] for k in UNIQUE) / len(UNIQUE)
-        rows.append({"fold": fi, "wr12": wr12, "wr9": wr9, **lv})
+        # MA-4 baseline на том же фолде: отрыв над наивом считается пайплайном, без хардкода
+        mlv = scorer.score(test, U.moving_average(train, test))["_levels"]
+        ma12 = sum(mlv.values()) / len(mlv)
+        ma9 = sum(mlv[k] for k in UNIQUE) / len(UNIQUE)
+        rows.append({"fold": fi, "wr12": wr12, "wr9": wr9, "ma4_wr12": ma12, "ma4_wr9": ma9, **lv})
         print(f"  фолд {fi} origin={pd.Timestamp(fold['origin']).date()} "
-              f"WRMSSE(12)={wr12:.4f} WRMSSE(9)={wr9:.4f}", flush=True)
+              f"WRMSSE(12)={wr12:.4f} WRMSSE(9)={wr9:.4f} MA4(12)={ma12:.4f}", flush=True)
 
     df = pd.DataFrame(rows)
     level_names = [k for k in df.columns if k.startswith("L")]
@@ -65,6 +71,12 @@ def main():
         "wrmsse9_mean": round(float(df["wr9"].mean()), 4),
         "wrmsse9_std": round(float(df["wr9"].std()), 4),
         "per_fold_wrmsse12": [round(float(x), 4) for x in df["wr12"]],
+        "ma4_wr12_mean": round(float(df["ma4_wr12"].mean()), 4),
+        "ma4_wr9_mean": round(float(df["ma4_wr9"].mean()), 4),
+        "model_vs_ma4_wr12_pct": round(float(
+            (df["ma4_wr12"].mean() - df["wr12"].mean()) / df["ma4_wr12"].mean() * 100), 1),
+        "model_vs_ma4_wr9_pct": round(float(
+            (df["ma4_wr9"].mean() - df["wr9"].mean()) / df["ma4_wr9"].mean() * 100), 1),
     }
     SUMMARY.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("итог:", summary, flush=True)

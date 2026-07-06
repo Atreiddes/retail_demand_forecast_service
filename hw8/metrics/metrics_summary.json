@@ -1,14 +1,18 @@
 {
   "n_folds": 4,
   "horizon": 8,
-  "wrmsse12_mean": 0.6129,
-  "wrmsse12_std": 0.0324,
-  "wrmsse9_mean": 0.6744,
-  "wrmsse9_std": 0.0263,
+  "wrmsse12_mean": 0.6046,
+  "wrmsse12_std": 0.0167,
+  "wrmsse9_mean": 0.6661,
+  "wrmsse9_std": 0.012,
   "per_fold_wrmsse12": [
-    0.6082,
-    0.5843,
-    0.5999,
-    0.6592
-  ]
+    0.6055,
+    0.5862,
+    0.6003,
+    0.6264
+  ],
+  "ma4_wr12_mean": 0.8451,
+  "ma4_wr9_mean": 0.8668,
+  "model_vs_ma4_wr12_pct": 28.5,
+  "model_vs_ma4_wr9_pct": 23.2
 }

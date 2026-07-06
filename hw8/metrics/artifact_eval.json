@@ -1,0 +1,21 @@
+{
+  "model_version": "foods-2016-05-14",
+  "eval_origin": "2016-03-19",
+  "horizon": 8,
+  "wrmsse12": 0.5716,
+  "wrmsse9": 0.6232,
+  "levels": {
+    "L1_total": 0.2452,
+    "L2_state": 0.4019,
+    "L3_store": 0.604,
+    "L4_cat": 0.2452,
+    "L5_dept": 0.3974,
+    "L6_state_cat": 0.4019,
+    "L7_state_dept": 0.5059,
+    "L8_store_cat": 0.604,
+    "L9_store_dept": 0.6659,
+    "L10_item": 0.8819,
+    "L11_item_state": 0.9244,
+    "L12_item_store": 0.9819
+  }
+}

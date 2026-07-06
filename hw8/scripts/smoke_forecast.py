@@ -18,10 +18,17 @@ def main():
     origin = art["origin"]
     df = pd.read_parquet(ROOT / "data" / "foods_weekly.parquet")
     df["week_start_date"] = pd.to_datetime(df["week_start_date"])
+    for c in ["item_id", "dept_id", "cat_id", "store_id", "state_id"]:
+        df[c] = df[c].astype(str)
     ids = sorted(df["id"].unique())[:50]
     hist = df[df["id"].isin(ids) & (df["week_start_date"] <= origin)]
 
-    out = forecast_series(hist, origin, 4)
+    # кросс-рядные агрегаты по всему срезу (как воркер берёт из БД), не по 50 рядам пачки
+    full = df[(df["n_days"] == 7) & (df["week_start_date"] <= origin)]
+    item_agg = full.groupby(["item_id", "week_start_date"])["units"].sum().rename("item_wk").reset_index()
+    dept_agg = full.groupby(["dept_id", "week_start_date"])["units"].sum().rename("dept_wk").reset_index()
+
+    out = forecast_series(hist, origin, 4, item_agg, dept_agg)
     print(out.head(12).to_string(index=False))
     bad = ((out["p10"] > out["p50"]) | (out["p50"] > out["p90"])).sum()
     nan = out[["p10", "p50", "p90"]].isna().sum().sum()

@@ -31,17 +31,25 @@ UNIQUE = ["L1_total", "L2_state", "L3_store", "L5_dept", "L7_state_dept",
 def main():
     art = load_artifact()
     df = pd.read_parquet(DATA)
+    df = df[df["n_days"] == 7]  # только полные недели: обрезанная хвостовая неделя иначе
+    # сравнивается с полнонедельным прогнозом и завышает WRMSSE в разы (и валит гейт)
+    for c in ["item_id", "dept_id", "cat_id", "store_id", "state_id"]:
+        df[c] = df[c].astype(str)
     weeks = sorted(df[TCOL].unique())
     origin = weeks[-HMAX - 1]  # последнее окно: HMAX недель факта после origin
     print(f"артефакт {art['model_version']}, origin оценки {pd.Timestamp(origin).date()}", flush=True)
 
     ids = sorted(df["id"].unique())
     hist_all = df[df[TCOL] <= origin]
+    # кросс-рядные агрегаты по всему срезу (как воркер берёт из БД), а не по пачке в 300 рядов
+    full7 = hist_all[hist_all["n_days"] == 7]
+    item_agg = full7.groupby(["item_id", TCOL])["units"].sum().rename("item_wk").reset_index()
+    dept_agg = full7.groupby(["dept_id", TCOL])["units"].sum().rename("dept_wk").reset_index()
     preds = []
     for i in range(0, len(ids), CHUNK):
         chunk_ids = set(ids[i:i + CHUNK])
         hist = hist_all[hist_all["id"].isin(chunk_ids)]
-        out = forecast_series(hist, origin, HMAX)
+        out = forecast_series(hist, origin, HMAX, item_agg, dept_agg)
         preds.append(out[["series_id", TCOL, "p50"]])
     pred = pd.concat(preds, ignore_index=True).rename(columns={"series_id": "id", "p50": "pred"})
 

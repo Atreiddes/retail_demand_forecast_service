@@ -1,0 +1,35 @@
+{
+  "n_folds": 4,
+  "horizon": 8,
+  "step": 8,
+  "new_cols": [
+    "nz_share_4",
+    "nz_share_13",
+    "item_rmean_4",
+    "dept_rmean_4"
+  ],
+  "old": {
+    "wr12_mean": 0.8693,
+    "wr12_std": 0.1313,
+    "wr9_mean": 0.9052,
+    "wr9_std": 0.1204,
+    "L12_mean": 1.1307
+  },
+  "new": {
+    "wr12_mean": 0.8506,
+    "wr12_std": 0.128,
+    "wr9_mean": 0.8883,
+    "wr9_std": 0.1183,
+    "L12_mean": 1.1272
+  },
+  "ma4": {
+    "wr12_mean": 1.044,
+    "wr12_std": 0.1131,
+    "wr9_mean": 1.0557,
+    "wr9_std": 0.1063,
+    "L12_mean": 1.1488
+  },
+  "new_vs_old_pct": 2.2,
+  "new_vs_ma4_pct": 18.5,
+  "old_vs_ma4_pct": 16.7
+}
