@@ -1,0 +1,114 @@
+"""Direct multi-horizon признаки для LightGBM без утечек и без рекурсии.
+
+Признаки считаются на момент origin, горизонт h - это признак. Для целевой недели w и
+горизонта h origin = w - h: лаги и rolling берутся относительно origin, признаки целевой
+недели (цена, календарь, SNAP) известны заранее. Для каждого h строится свой кадр, потом
+конкатенация. На прогнозе ряды вне ассортимента (available_days==0) маскируются в 0.
+"""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pandas as pd
+
+from events import EVENT_FEATURES
+
+TCOL = "week_start_date"
+HMAX = 8
+LAGS = [1, 2, 3, 4, 8, 13, 26, 52]   # относительно origin
+ROLL = [4, 8, 13, 26]
+
+# Event one-hot (типы событий + топ-флаги) подключаются тумблером USE_EVENTS (см. events.py).
+USE_EVENTS = os.getenv("USE_EVENTS", "0") == "1"
+
+CAT_FEATURES = ["item_id", "dept_id", "cat_id", "store_id", "state_id"]
+NUM_FEATURES = (
+    [f"lag_{k}" for k in LAGS]
+    + [f"rmean_{k}" for k in ROLL]
+    + ["rstd_13", "rmax_13", "nz_share_4", "nz_share_13", "item_rmean_4", "dept_rmean_4", "h"]
+    + ["sell_price", "price_rel", "disc_pct", "is_promo", "weeks_since_promo"]
+    + ["woy_sin", "woy_cos", "month", "is_xmas", "snap_days", "event_days", "age_weeks"]
+    + (EVENT_FEATURES if USE_EVENTS else [])
+)
+FEATURES = NUM_FEATURES + CAT_FEATURES
+TARGET = "units"
+
+
+def _target_week_features(df):
+    """Признаки целевой недели w (известны заранее на момент любого origin < w)."""
+    g = df.groupby("id", observed=True)["sell_price"]
+    med = g.shift(1).groupby(df["id"], observed=True).rolling(52, min_periods=8).median()
+    med = med.reset_index(level=0, drop=True)
+    df["price_rel"] = (df["sell_price"] / med).astype("float32")
+    df["disc_pct"] = ((df["sell_price"] / med - 1.0) * 100).astype("float32")
+    df["is_promo"] = (df["disc_pct"] <= -10).astype("int8")
+    wk = df[TCOL].astype("int64").to_numpy() // (7 * 24 * 3600 * 10**9)
+    promo_ord = pd.Series(np.where(df["is_promo"].to_numpy() == 1, wk, np.nan), index=df.index)
+    last = promo_ord.groupby(df["id"], observed=True).ffill()
+    df["weeks_since_promo"] = (pd.Series(wk, index=df.index) - last).clip(0, 52).fillna(52).astype("int16")
+    woy = df[TCOL].dt.isocalendar().week.astype(int).clip(1, 53)
+    df["woy_sin"] = np.sin(2 * np.pi * woy / 52.0).astype("float32")
+    df["woy_cos"] = np.cos(2 * np.pi * woy / 52.0).astype("float32")
+    df["month"] = df[TCOL].dt.month.astype("int8")
+    df["is_xmas"] = woy.isin([51, 52, 1]).astype("int8")
+    first = df["id"].map(df[df["units"] > 0].groupby("id", observed=True)[TCOL].min())
+    df["age_weeks"] = ((df[TCOL] - first).dt.days // 7).clip(lower=0).fillna(0).astype("int16")
+    return df
+
+
+def build_direct(full: pd.DataFrame) -> pd.DataFrame:
+    """Кадр (id, week, h) с origin-относительными признаками. 4x строк (по h)."""
+    df = full.sort_values(["id", TCOL]).reset_index(drop=True).copy()
+    df = _target_week_features(df)
+    u = df.groupby("id", observed=True)["units"]
+    # заём силы: суммарный спрос товара во всех магазинах и отдела за неделю (origin-относительно)
+    df["item_wk"] = df.groupby(["item_id", TCOL], observed=True)["units"].transform("sum").astype("float32")
+    df["dept_wk"] = df.groupby(["dept_id", TCOL], observed=True)["units"].transform("sum").astype("float32")
+    iu = df.groupby("id", observed=True)["item_wk"]
+    du = df.groupby("id", observed=True)["dept_wk"]
+
+    meta = ["id", TCOL, "units", "revenue", "available_days",
+            "sell_price", "price_rel", "disc_pct", "is_promo", "weeks_since_promo",
+            "woy_sin", "woy_cos", "month", "is_xmas", "snap_days", "event_days",
+            "age_weeks"] + (EVENT_FEATURES if USE_EVENTS else []) + CAT_FEATURES
+    frames = []
+    for h in range(1, HMAX + 1):
+        f = df[meta].copy()
+        f["h"] = np.int8(h)
+        for k in LAGS:
+            f[f"lag_{k}"] = u.shift(h - 1 + k).astype("float32")  # units[w-h-(k-1)]
+        sh = u.shift(h)                                            # units[w-h] = origin
+        shg = sh.groupby(df["id"], observed=True)
+        for m in ROLL:
+            f[f"rmean_{m}"] = shg.rolling(m, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        f["rstd_13"] = shg.rolling(13, min_periods=2).std().reset_index(level=0, drop=True).astype("float32")
+        f["rmax_13"] = shg.rolling(13, min_periods=1).max().reset_index(level=0, drop=True).astype("float32")
+        # прерывистость: доля недель с продажами в окне до origin (сигнал sparse-ряда).
+        # NaN от shift сохраняем (как в rmean), чтобы край ряда не считался нулём продаж.
+        nzg = (sh > 0).astype("float32").where(sh.notna()).groupby(df["id"], observed=True)
+        f["nz_share_4"] = nzg.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        f["nz_share_13"] = nzg.rolling(13, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        ish = iu.shift(h).groupby(df["id"], observed=True)
+        f["item_rmean_4"] = ish.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        dsh = du.shift(h).groupby(df["id"], observed=True)
+        f["dept_rmean_4"] = dsh.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        frames.append(f)
+    out = pd.concat(frames, ignore_index=True)
+    for c in CAT_FEATURES:
+        out[c] = out[c].astype("category")
+    return out
+
+
+def select_test(frame, test_weeks):
+    """Строки прогноза: для недели test_weeks[h-1] берём кадр h (его origin = неделя - h).
+    origin неявно задан списком недель (test_weeks[h-1] - h одинаков для всех h)."""
+    parts = []
+    for h, tw in enumerate(test_weeks, 1):
+        parts.append(frame[(frame[TCOL] == tw) & (frame["h"] == h)])
+    return pd.concat(parts, ignore_index=True)
+
+
+def train_slice(frame, origin, cap_weeks):
+    lo = origin - pd.Timedelta(weeks=cap_weeks)
+    return frame[(frame[TCOL] <= origin) & (frame[TCOL] > lo) & (frame["available_days"] > 0)]

@@ -1,0 +1,11 @@
+/.quarto/
+**/*.quarto_ipynb
+_freeze/
+_output/
+.cache/
+**/__pycache__/
+*.pyc
+
+# генерируемые артефакты прогноза (пересоздаются train_production.py)
+serve/forecast.parquet
+serve/model.txt
