@@ -19,7 +19,7 @@ CAT_FEATURES = ["item_id", "dept_id", "cat_id", "store_id", "state_id"]
 NUM_FEATURES = (
     [f"lag_{k}" for k in LAGS]
     + [f"rmean_{k}" for k in ROLL]
-    + ["rstd_13", "rmax_13", "h"]
+    + ["rstd_13", "rmax_13", "nz_share_4", "nz_share_13", "item_rmean_4", "dept_rmean_4", "h"]
     + ["sell_price", "price_rel", "disc_pct", "is_promo", "weeks_since_promo"]
     + ["woy_sin", "woy_cos", "month", "is_xmas", "snap_days", "event_days", "age_weeks"]
 )
@@ -57,6 +57,14 @@ def build_direct(full: pd.DataFrame) -> pd.DataFrame:
     df = full.sort_values(["id", TCOL]).reset_index(drop=True).copy()
     df = _target_week_features(df)
     u = df.groupby("id", observed=True)["units"]
+    # кросс-рядные агрегаты: на обучении считаются по всему срезу (transform), на прогнозе
+    # приходят готовыми из БД (сумма по всем магазинам товара/отдела за неделю), т.к. пачка -
+    # подмножество рядов и локальная сумма была бы неполной
+    if "item_wk" not in df.columns:
+        df["item_wk"] = df.groupby(["item_id", TCOL], observed=True)["units"].transform("sum").astype("float32")
+        df["dept_wk"] = df.groupby(["dept_id", TCOL], observed=True)["units"].transform("sum").astype("float32")
+    iu = df.groupby("id", observed=True)["item_wk"]
+    du = df.groupby("id", observed=True)["dept_wk"]
 
     meta = ["id", TCOL, "units", "revenue", "available_days",
             "sell_price", "price_rel", "disc_pct", "is_promo", "weeks_since_promo",
@@ -74,6 +82,15 @@ def build_direct(full: pd.DataFrame) -> pd.DataFrame:
             f[f"rmean_{m}"] = shg.rolling(m, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
         f["rstd_13"] = shg.rolling(13, min_periods=2).std().reset_index(level=0, drop=True).astype("float32")
         f["rmax_13"] = shg.rolling(13, min_periods=1).max().reset_index(level=0, drop=True).astype("float32")
+        # прерывистость: доля недель с продажами в окне до origin (сигнал sparse-ряда).
+        # NaN от shift сохраняем (как в rmean), чтобы край ряда не считался нулём продаж.
+        nzg = (sh > 0).astype("float32").where(sh.notna()).groupby(df["id"], observed=True)
+        f["nz_share_4"] = nzg.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        f["nz_share_13"] = nzg.rolling(13, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        ish = iu.shift(h).groupby(df["id"], observed=True)
+        f["item_rmean_4"] = ish.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
+        dsh = du.shift(h).groupby(df["id"], observed=True)
+        f["dept_rmean_4"] = dsh.rolling(4, min_periods=1).mean().reset_index(level=0, drop=True).astype("float32")
         frames.append(f)
     out = pd.concat(frames, ignore_index=True)
     for c in CAT_FEATURES:

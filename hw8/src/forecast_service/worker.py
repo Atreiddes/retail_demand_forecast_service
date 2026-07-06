@@ -21,7 +21,8 @@ def handle(body):
     try:
         crud.start_chunk(msg["chunk_id"], WORKER_ID)
         hist = crud.read_history(msg["series_ids"], msg["origin"])
-        out = forecast_series(hist, msg["origin"], msg["horizon"])
+        item_agg, dept_agg = crud.read_item_dept_weekly(msg["origin"])
+        out = forecast_series(hist, msg["origin"], msg["horizon"], item_agg, dept_agg)
         crud.complete_chunk(msg["run_id"], msg["chunk_id"], out, WORKER_ID)
         crud.finalize_run(msg["run_id"])
         print(f"chunk {msg['chunk_id']} готов: {out['series_id'].nunique()} рядов", flush=True)

@@ -16,7 +16,8 @@ def _work(msgs):
     for m in msgs:
         crud.start_chunk(m["chunk_id"], "test")
         hist = crud.read_history(m["series_ids"], m["origin"])
-        out = forecast_series(hist, m["origin"], m["horizon"])
+        item_agg, dept_agg = crud.read_item_dept_weekly(m["origin"])
+        out = forecast_series(hist, m["origin"], m["horizon"], item_agg, dept_agg)
         crud.complete_chunk(m["run_id"], m["chunk_id"], out, "test")
 
 
@@ -62,7 +63,9 @@ def test_idempotent_upsert(client, published):
     rid = r.json()["run_id"]
     m = published[0]
     crud.start_chunk(m["chunk_id"], "t")
-    out = forecast_series(crud.read_history(m["series_ids"], m["origin"]), m["origin"], m["horizon"])
+    item_agg, dept_agg = crud.read_item_dept_weekly(m["origin"])
+    out = forecast_series(crud.read_history(m["series_ids"], m["origin"]),
+                          m["origin"], m["horizon"], item_agg, dept_agg)
     crud.complete_chunk(m["run_id"], m["chunk_id"], out, "t")
     n1 = _count(rid)
     crud.complete_chunk(m["run_id"], m["chunk_id"], out, "t")  # повтор не должен задваивать

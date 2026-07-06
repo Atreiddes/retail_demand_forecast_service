@@ -4,5 +4,8 @@
   "horizon_weeks": 8,
   "use_events": false,
   "lightgbm_version": "4.6.0",
-  "trained_at": "2026-07-04"
+  "trained_at": "2026-07-06",
+  "wrmsse_foods_backtest": 0.849,
+  "wrmsse_foods_backtest_9lvl": 0.886,
+  "wrmsse_note": "walk-forward, 4 непересекающихся окна по 8 недель, вне выборки"
 }

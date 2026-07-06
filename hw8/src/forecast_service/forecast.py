@@ -88,13 +88,25 @@ def _future_rows(hist, origin, horizon):
     return rows.drop(columns=["snap_CA", "snap_TX", "snap_WI"])
 
 
-def forecast_series(history: pd.DataFrame, origin, horizon=HMAX) -> pd.DataFrame:
+def forecast_series(history: pd.DataFrame, origin, horizon=HMAX,
+                    item_agg=None, dept_agg=None) -> pd.DataFrame:
     """history: строки SalesHistory нужных рядов с атрибутами ряда (колонка id = series_id).
+    item_agg/dept_agg: недельные суммы по товару/отделу по всему срезу (из crud.read_item_dept_weekly),
+    нужны для кросс-рядных признаков, т.к. пачка - подмножество рядов. Если не переданы,
+    build_direct считает их по локальному кадру (верно только на полном срезе).
     Возвращает [series_id, week_start_date, h, p10, p50, p90]."""
     art = load_artifact()
     origin = pd.Timestamp(origin)
     hist = history[(history["n_days"] == 7) & (history[TCOL] <= origin)].copy()
     panel = pd.concat([hist, _future_rows(hist, origin, horizon)], ignore_index=True)
+    if (item_agg is None) != (dept_agg is None):
+        raise ValueError("item_agg и dept_agg передаются только вместе: иначе кросс-рядные "
+                         "признаки посчитаются по частичному срезу пачки")
+    if item_agg is not None and dept_agg is not None:
+        panel = panel.merge(item_agg, on=["item_id", TCOL], how="left")
+        panel = panel.merge(dept_agg, on=["dept_id", TCOL], how="left")
+        panel["item_wk"] = panel["item_wk"].fillna(0.0).astype("float32")
+        panel["dept_wk"] = panel["dept_wk"].fillna(0.0).astype("float32")
     frame = build_direct(panel)
     weeks = [origin + timedelta(weeks=h) for h in range(1, horizon + 1)]
     te = select_test(frame, weeks).copy()

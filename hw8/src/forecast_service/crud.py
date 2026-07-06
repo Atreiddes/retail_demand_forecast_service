@@ -72,6 +72,42 @@ def read_history(series_ids, origin):
     return df
 
 
+# агрегат зависит только от origin и одинаков для всех пачек прогона - кэшируем в процессе,
+# иначе каждый воркер гоняет два полных скана sales_history на каждую пачку
+_AGG_CACHE: dict = {}
+
+
+def read_item_dept_weekly(origin):
+    """Недельные суммы спроса по товару (во всех магазинах) и по отделу за окно
+    origin-HIST_WEEKS..origin. Воркеру нужны как кросс-рядные признаки: пачка - подмножество
+    рядов, а сумма должна быть по всему срезу товара/отдела, как на обучении.
+    Возвращает (item_df[item_id, week, item_wk], dept_df[dept_id, week, dept_wk])."""
+    key = str(pd.Timestamp(origin).date())
+    if key in _AGG_CACHE:
+        return _AGG_CACHE[key]
+    lo = (pd.Timestamp(origin) - pd.Timedelta(weeks=HIST_WEEKS + 1)).date()
+    params = {"origin": key, "lo": lo}
+
+    def agg(col, name):
+        sql = text(f"""
+            SELECT s.{col} AS {col}, h.week_start_date, SUM(h.units) AS {name}
+            FROM sales_history h JOIN series s ON s.id = h.series_id
+            WHERE h.n_days = 7 AND h.week_start_date <= :origin AND h.week_start_date > :lo
+            GROUP BY s.{col}, h.week_start_date
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql_query(sql, conn, params=params)
+        df["week_start_date"] = pd.to_datetime(df["week_start_date"])
+        df[name] = df[name].astype("float32")
+        return df
+
+    res = (agg("item_id", "item_wk"), agg("dept_id", "dept_wk"))
+    _AGG_CACHE[key] = res
+    if len(_AGG_CACHE) > 8:            # ограничение кэша: несколько последних origin
+        _AGG_CACHE.pop(next(iter(_AGG_CACHE)))
+    return res
+
+
 def start_chunk(chunk_id, worker_id):
     with Session(engine) as s:
         s.execute(text("UPDATE forecast_chunk SET status='processing', worker_id=:w, started_at=now() "
