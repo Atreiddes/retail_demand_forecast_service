@@ -208,6 +208,22 @@ def recent_runs(limit=15):
                  "status": r.status, "created_at": str(r.created_at)[:19]} for r in runs]
 
 
+def run_status_counts():
+    """Число прогонов в каждом статусе, для гейджей мониторинга."""
+    with Session(engine) as s:
+        rows = s.exec(select(models.ForecastRun.status, func.count())
+                      .group_by(models.ForecastRun.status)).all()
+    return {status: n for status, n in rows}
+
+
+def last_run_id(status):
+    """id последнего прогона в заданном статусе, иначе None."""
+    with Session(engine) as s:
+        return s.exec(select(models.ForecastRun.id)
+                      .where(models.ForecastRun.status == status)
+                      .order_by(models.ForecastRun.id.desc()).limit(1)).first()
+
+
 def catalog(run_id):
     # ширина интервала суммируется за горизонт (как и P50), чтобы колонки были в одном масштабе
     sql = """SELECT p.series_id, s.item_id, s.dept_id, s.store_id, s.state_id,

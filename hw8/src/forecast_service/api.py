@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 from contextlib import asynccontextmanager
 from datetime import date
 from functools import lru_cache
@@ -20,9 +21,10 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
-from . import crud, mq
+from . import crud, models, mq, prom
 from .config import settings
 from .db import create_db
 from .forecast import load_artifact
@@ -45,21 +47,66 @@ async def _reap_stale():
             print("проверка зависших пачек:", e, flush=True)
 
 
+async def _refresh_metrics():
+    """Фоновый сбор гейджей: статусы прогонов, качество модели, дрейф последнего
+    завершённого прогона. Быстрые метрики (запросы, пачки) считаются в месте события."""
+    while True:
+        try:
+            await asyncio.to_thread(_collect_metrics)
+        except Exception as e:
+            print("сбор метрик:", e, flush=True)
+        await asyncio.sleep(15)
+
+
+def _collect_metrics():
+    prom.set_runs_status(crud.run_status_counts())
+    summ = settings.metrics_dir / "metrics_summary.json"
+    if summ.exists():
+        prom.set_quality(json.loads(summ.read_text(encoding="utf-8")))
+    run_id = crud.last_run_id(models.COMPLETED)
+    if run_id is not None:
+        res = _drift_cached(run_id)
+        if res:
+            prom.set_drift(res["features"])
+
+
 @asynccontextmanager
 async def lifespan(app):
     create_db()
     try:
-        load_artifact()
+        art = load_artifact()
+        prom.set_model_version(art["model_version"])
     except Exception as e:
         print("артефакт не загружен:", e, flush=True)
     crud.reconcile()
     reaper = asyncio.create_task(_reap_stale())
+    collector = asyncio.create_task(_refresh_metrics())
     yield
     reaper.cancel()
+    collector.cancel()
 
 
 app = FastAPI(title="Прогноз спроса", docs_url="/api/docs", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+
+@app.middleware("http")
+async def _prometheus_mw(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    route = request.scope.get("route")
+    path = getattr(route, "path", None) or "other"
+    if path != "/metrics":  # сам эндпоинт метрик в статистику не берём
+        prom.HTTP_REQUESTS.labels(
+            method=request.method, path=path, status=str(response.status_code)).inc()
+        prom.HTTP_LATENCY.labels(
+            method=request.method, path=path).observe(time.perf_counter() - start)
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 class RunRequest(BaseModel):
@@ -109,6 +156,7 @@ def create_run(req: RunRequest, x_api_key: str | None = Header(None, alias="X-AP
     except Exception as e:
         crud.fail_run(run_id)  # брокер недоступен: закрываем прогон, чтобы он не завис в очереди
         raise HTTPException(503, f"очередь недоступна: {e}")
+    prom.RUNS_CREATED.labels(scope="store" if req.store_id else "all").inc()
     return {"run_id": run_id, "n_chunks": len(msgs)}
 
 
