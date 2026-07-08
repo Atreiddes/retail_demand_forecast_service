@@ -248,6 +248,98 @@ def accuracy_vs_actual(run_id):
     return {"n_points": int(len(df)), "wmape": wmape, "bias": bias, "coverage": coverage}
 
 
+def _wmape_bias(g):
+    """WMAPE, смещение и покрытие интервала по группе точек прогноз-факт. None при нулевом факте."""
+    total = float(g["units"].sum())
+    if total <= 0:
+        return None
+    p50 = g["p50"].to_numpy(dtype=float)
+    act = g["units"].to_numpy(dtype=float)
+    cov = float(((g["p10"] <= g["units"]) & (g["units"] <= g["p90"])).mean())
+    return {"n": int(len(g)), "wmape": round(float(np.abs(p50 - act).sum() / total), 4),
+            "bias": round(float((p50 - act).sum() / total), 4), "coverage": round(cov, 4)}
+
+
+def accuracy_breakdowns(run_id):
+    """Разрезы точности прогноз-факт для мониторинга деградации по прогону: по горизонту,
+    по штату (плановый уровень), промо против базовых недель, сегментам движения и cold-start,
+    плюс forecast value add против базы MA-4. None, если факта по прогону ещё нет.
+
+    База MA-4, сегменты и cold-start считаются только по истории до origin (без утечки факта)."""
+    with Session(engine) as s:
+        run = s.get(models.ForecastRun, run_id)
+        if run is None:
+            return None
+        origin = run.origin
+
+    joined = text("""
+        SELECT p.h, p.p10, p.p50, p.p90, h.units, p.series_id,
+               (h.event_days > 0 OR h.snap_days > 0) AS promo, s.state_id
+        FROM forecast_point p
+        JOIN sales_history h ON h.series_id = p.series_id
+             AND h.week_start_date = p.week_start_date AND h.n_days = 7
+        JOIN series s ON s.id = p.series_id
+        WHERE p.run_id = :rid
+    """)
+    hist_sql = text("""
+        SELECT h.series_id, avg(h.units) AS mu, count(*) AS nweeks
+        FROM sales_history h
+        WHERE h.n_days = 7 AND h.week_start_date <= :origin
+          AND h.series_id IN (SELECT DISTINCT series_id FROM forecast_point WHERE run_id = :rid)
+        GROUP BY h.series_id
+    """)
+    ma_sql = text("""
+        SELECT series_id, avg(units) AS ma4 FROM (
+            SELECT h.series_id, h.units,
+                   row_number() OVER (PARTITION BY h.series_id ORDER BY h.week_start_date DESC) AS rn
+            FROM sales_history h
+            WHERE h.n_days = 7 AND h.week_start_date <= :origin
+              AND h.series_id IN (SELECT DISTINCT series_id FROM forecast_point WHERE run_id = :rid)
+        ) t WHERE rn <= 4 GROUP BY series_id
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql_query(joined, conn, params={"rid": run_id})
+        if df.empty:
+            return None
+        hist = pd.read_sql_query(hist_sql, conn, params={"rid": run_id, "origin": origin})
+        ma = pd.read_sql_query(ma_sql, conn, params={"rid": run_id, "origin": origin})
+
+    # сегмент ряда по истории до origin: короткая история - cold-start, редкие продажи - прерывистый
+    hist["segment"] = np.where(hist["nweeks"] < 26, "coldstart",
+                               np.where(hist["mu"] < 1.0, "intermittent", "frequent"))
+    df = df.merge(hist[["series_id", "segment"]], on="series_id", how="left")
+    df = df.merge(ma, on="series_id", how="left")
+
+    def by(col):
+        return {str(k): v for k, v in ((k, _wmape_bias(g)) for k, g in df.groupby(col)) if v}
+
+    promo = {"promo" if k else "base": v for k, v in
+             ((k, _wmape_bias(g)) for k, g in df.groupby("promo")) if v}
+    by_state = by("state_id")
+
+    # forecast value add: WMAPE модели против плоской базы MA-4 (только история до origin)
+    total = float(df["units"].sum())
+    fva = None
+    if total > 0:
+        act = df["units"].to_numpy(dtype=float)
+        model_wmape = float(np.abs(df["p50"].to_numpy(dtype=float) - act).sum() / total)
+        ma4_wmape = float(np.abs(df["ma4"].fillna(0).to_numpy(dtype=float) - act).sum() / total)
+        improvement = round((ma4_wmape - model_wmape) / ma4_wmape * 100, 1) if ma4_wmape > 0 else None
+        fva = {"model_wmape": round(model_wmape, 4), "ma4_wmape": round(ma4_wmape, 4),
+               "improvement_pct": improvement}
+
+    planning_bias = max((abs(v["bias"]) for v in by_state.values()), default=None)
+    return {
+        "by_horizon": {str(int(k)): v for k, v in
+                       ((k, _wmape_bias(g)) for k, g in df.groupby("h")) if v},
+        "by_state": by_state,
+        "promo": promo,
+        "segments": by("segment"),
+        "fva_ma4": fva,
+        "planning_bias": round(planning_bias, 4) if planning_bias is not None else None,
+    }
+
+
 def catalog(run_id):
     # ширина интервала суммируется за горизонт (как и P50), чтобы колонки были в одном масштабе
     sql = """SELECT p.series_id, s.item_id, s.dept_id, s.store_id, s.state_id,

@@ -39,6 +39,15 @@ ACCURACY_BIAS = Gauge("forecast_accuracy_bias", "Смещение прогноз
 INTERVAL_COVERAGE = Gauge("forecast_interval_coverage", "Доля факта в интервале P10-P90")
 DEGRADED = Gauge("forecast_degraded", "Модель деградировала по гейту (1) или нет (0)")
 
+# Разрезы точности: по горизонту, по штату (плановый уровень), по сегментам (промо/база,
+# движение), forecast value add против базы MA-4 и плановое смещение для гейта
+WMAPE_BY_HORIZON = Gauge("forecast_wmape_by_horizon", "WMAPE по горизонту прогноза", ["h"])
+WMAPE_SEGMENT = Gauge("forecast_wmape_segment", "WMAPE по сегменту", ["segment"])
+BIAS_SEGMENT = Gauge("forecast_bias_segment", "Смещение по сегменту", ["segment"])
+BIAS_BY_STATE = Gauge("forecast_bias_by_state", "Смещение по штату", ["state"])
+FVA_MA4 = Gauge("forecast_fva_ma4_pct", "Forecast value add против базы MA-4, %")
+PLANNING_BIAS = Gauge("forecast_planning_bias", "Максимум модуля смещения на плановом уровне (штат)")
+
 _ACTIVE = {"new", "queued", "processing"}
 
 
@@ -71,18 +80,40 @@ def set_model_version(version: str) -> None:
 
 
 def set_accuracy(accuracy: dict | None) -> None:
-    if not accuracy:
-        return
-    if accuracy.get("wmape") is not None:
-        ACCURACY_WMAPE.set(accuracy["wmape"])
-    if accuracy.get("bias") is not None:
-        ACCURACY_BIAS.set(accuracy["bias"])
-    if accuracy.get("coverage") is not None:
-        INTERVAL_COVERAGE.set(accuracy["coverage"])
+    # Безлейбловые гейджи выставляем всегда: при отсутствии факта - NaN, а не оставляем
+    # дефолтный 0, иначе алерты по сырым гейджам зажигались бы на пустом состоянии
+    acc = accuracy or {}
+    ACCURACY_WMAPE.set(acc["wmape"] if acc.get("wmape") is not None else float("nan"))
+    ACCURACY_BIAS.set(acc["bias"] if acc.get("bias") is not None else float("nan"))
+    INTERVAL_COVERAGE.set(acc["coverage"] if acc.get("coverage") is not None else float("nan"))
 
 
 def set_degraded(report: dict) -> None:
     DEGRADED.set(0 if report["ok"] else 1)
+
+
+def set_breakdowns(bd: dict | None) -> None:
+    # Лейбловые гейджи чистим каждый цикл, чтобы не копить устаревшие серии; безлейбловые
+    # выставляем всегда (NaN при отсутствии данных, а не дефолтный 0)
+    WMAPE_BY_HORIZON.clear()
+    WMAPE_SEGMENT.clear()
+    BIAS_SEGMENT.clear()
+    BIAS_BY_STATE.clear()
+    if not bd:
+        FVA_MA4.set(float("nan"))
+        PLANNING_BIAS.set(float("nan"))
+        return
+    for h, v in bd["by_horizon"].items():
+        WMAPE_BY_HORIZON.labels(h=h).set(v["wmape"])
+    for group in (bd["promo"], bd["segments"]):
+        for seg, v in group.items():
+            WMAPE_SEGMENT.labels(segment=seg).set(v["wmape"])
+            BIAS_SEGMENT.labels(segment=seg).set(v["bias"])
+    for state, v in bd["by_state"].items():
+        BIAS_BY_STATE.labels(state=state).set(v["bias"])
+    fva = bd.get("fva_ma4")
+    FVA_MA4.set(fva["improvement_pct"] if fva and fva.get("improvement_pct") is not None else float("nan"))
+    PLANNING_BIAS.set(bd["planning_bias"] if bd.get("planning_bias") is not None else float("nan"))
 
 
 def serve(port: int = 9100) -> None:

@@ -33,3 +33,32 @@ def test_gate_drift():
 def test_gate_no_data():
     rep = m.gate(None, None)
     assert rep["ok"]
+
+
+def test_gate_planning_bias():
+    bd = {"planning_bias": 0.2, "promo": {}, "fva_ma4": None}
+    rep = m.gate(None, None, bd)
+    assert not rep["ok"]
+    assert any("плановое смещение" in w for w in rep["warnings"])
+
+
+def test_gate_fva_collapsed():
+    bd = {"planning_bias": 0.01, "promo": {}, "fva_ma4": {"improvement_pct": -3.0}}
+    rep = m.gate(None, None, bd)
+    assert not rep["ok"]
+    assert any("MA-4" in w for w in rep["warnings"])
+
+
+def test_gate_promo_poor():
+    bd = {"planning_bias": 0.01, "promo": {"promo": {"wmape": 0.9, "bias": 0.0, "coverage": 0.8}},
+          "fva_ma4": {"improvement_pct": 5.0}}
+    rep = m.gate(None, None, bd)
+    assert not rep["ok"]
+    assert any("промо" in w for w in rep["warnings"])
+
+
+def test_gate_breakdowns_ok():
+    bd = {"planning_bias": 0.02, "promo": {"promo": {"wmape": 0.3, "bias": 0.0, "coverage": 0.8}},
+          "fva_ma4": {"improvement_pct": 4.0}}
+    rep = m.gate(None, None, bd)
+    assert rep["ok"]

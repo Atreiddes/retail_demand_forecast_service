@@ -28,6 +28,24 @@ groups:
           summary: "Заметный дрейф входных признаков"
           description: "PSI признака выше 0.25 - распределение входа заметно ушло от эталона год назад."
 
+      - alert: ModelBeatenByBaseline
+        expr: forecast_fva_ma4_pct{job="forecast-api"} <= 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Модель перестала бить базу MA-4"
+          description: "Прирост точности над скользящим средним MA-4 не выше нуля - относительная деградация."
+
+      - alert: PlanningBiasHigh
+        expr: forecast_planning_bias{job="forecast-api"} > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Смещение на плановом уровне велико"
+          description: "Модуль смещения на уровне штата выше 0.1 - систематический сдвиг заказа на плановом уровне."
+
       - alert: WorkerChunkFailures
         expr: sum(rate(forecast_chunks_processed_total{job="forecast-worker",result="failed"}[10m])) > 0
         for: 10m

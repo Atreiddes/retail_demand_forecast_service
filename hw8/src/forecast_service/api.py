@@ -67,7 +67,8 @@ def _monitoring_report():
     accuracy = crud.accuracy_vs_actual(run_id)
     res = _drift_cached(run_id)
     drift = res["features"] if res else None
-    return monitoring.gate(accuracy, drift)
+    breakdowns = crud.accuracy_breakdowns(run_id)
+    return monitoring.gate(accuracy, drift, breakdowns)
 
 
 def _collect_metrics():
@@ -79,6 +80,7 @@ def _collect_metrics():
     if report["drift"]:
         prom.set_drift(report["drift"])
     prom.set_accuracy(report["accuracy"])
+    prom.set_breakdowns(report["breakdowns"])
     prom.set_degraded(report)
 
 
