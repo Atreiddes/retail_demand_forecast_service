@@ -414,15 +414,14 @@ def revision_volatility(max_runs=12):
         df = pd.read_sql_query(sql, conn, params={"n": max_runs})
     if df.empty:
         return None
-
-    def cov(g):
-        if g["origin"].nunique() < 2:
-            return np.nan
-        m = g["p50"].mean()
-        return g["p50"].std(ddof=0) / m if m > 0 else np.nan
-
-    vals = df.groupby(["series_id", "week_start_date"]).apply(cov).dropna()
-    return round(float(vals.mean()), 4) if not vals.empty else None
+    key = ["series_id", "week_start_date"]
+    df = df[df.groupby(key)["origin"].transform("nunique") >= 2]  # только ряд-неделя с >=2 origin
+    if df.empty:
+        return None
+    stats = df.groupby(key)["p50"].agg(["mean", "std"])
+    stats = stats[stats["mean"] > 0]
+    cov = (stats["std"] / stats["mean"]).dropna()
+    return round(float(cov.mean()), 4) if not cov.empty else None
 
 
 def catalog(run_id):

@@ -72,12 +72,18 @@ def _monitoring_report():
     return monitoring.gate(accuracy, drift, breakdowns, health)
 
 
+# последний отчёт гейта из фонового сбора: эндпоинт отдаёт его, а не пересчитывает тяжёлые SQL
+_last_report: dict | None = None
+
+
 def _collect_metrics():
+    global _last_report
     prom.set_runs_status(crud.run_status_counts())
     summ = settings.metrics_dir / "metrics_summary.json"
     if summ.exists():
         prom.set_quality(json.loads(summ.read_text(encoding="utf-8")))
     report = _monitoring_report()
+    _last_report = report
     if report["drift"]:
         prom.set_drift(report["drift"])
     prom.set_accuracy(report["accuracy"])
@@ -290,8 +296,9 @@ def drift(run_id: int):
 @app.get("/api/monitoring")
 def monitoring_report():
     """Гейт деградации: точность прогноз-факт, дрейф и сводный флаг ok с предупреждениями.
+    Отдаёт последний отчёт фонового сбора (быстро); считает на месте, только пока его нет.
     Этот же отчёт опрашивает DAG monitor_and_retrain для запуска переобучения."""
-    return _monitoring_report()
+    return _last_report if _last_report is not None else _monitoring_report()
 
 
 @app.post("/api/alerts")
