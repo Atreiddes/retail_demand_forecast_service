@@ -54,3 +54,21 @@ groups:
         annotations:
           summary: "Воркеры проваливают пачки"
           description: "Есть провалы обработки пачек за последние 10 минут."
+
+      - alert: DataIncomplete
+        expr: forecast_latest_week_completeness{job="forecast-api"} < 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Свежие данные загрузились не полностью"
+          description: "Доля недавно активных рядов с фактом за последнюю неделю ниже 0.9 - загрузка неполная или запоздала."
+
+      - alert: ForecastUnstable
+        expr: forecast_revision_volatility{job="forecast-api"} > 0.3
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Прогноз нестабилен между прогонами"
+          description: "Разброс P50 на одну неделю ряда между origin выше 0.3 - прогноз сильно дёргается от прогона к прогону."

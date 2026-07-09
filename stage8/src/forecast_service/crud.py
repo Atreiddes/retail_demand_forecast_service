@@ -357,6 +357,74 @@ def accuracy_breakdowns(run_id):
     }
 
 
+def data_freshness():
+    """Свежесть факта: последняя полная неделя, глубина истории и полнота последней недели -
+    доля недавно активных рядов, у которых уже есть факт за последнюю неделю. Низкая полнота -
+    признак неполной или запоздавшей загрузки данных. None, если истории нет."""
+    with engine.connect() as conn:
+        latest = conn.execute(text(
+            "SELECT max(week_start_date) FROM sales_history WHERE n_days = 7")).scalar()
+        if latest is None:
+            return None
+        weeks = conn.execute(text(
+            "SELECT count(DISTINCT week_start_date) FROM sales_history WHERE n_days = 7")).scalar()
+        in_latest = conn.execute(text(
+            "SELECT count(DISTINCT series_id) FROM sales_history "
+            "WHERE n_days = 7 AND week_start_date = :w"), {"w": latest}).scalar()
+        lo = (pd.Timestamp(latest) - pd.Timedelta(weeks=13)).date()
+        active = conn.execute(text(
+            "SELECT count(DISTINCT series_id) FROM sales_history "
+            "WHERE n_days = 7 AND week_start_date > :lo"), {"lo": lo}).scalar()
+    completeness = round(in_latest / active, 4) if active else None
+    return {"latest_week": str(latest), "latest_week_ts": int(pd.Timestamp(latest).timestamp()),
+            "history_weeks": int(weeks), "completeness": completeness}
+
+
+def assortment_churn(window_weeks=13):
+    """Дрейф ассортимента: новые и выбывшие ряды. Активный ряд - с продажами (units>0).
+    Последнее окно window_weeks против предыдущего такого же. None, если истории нет."""
+    with engine.connect() as conn:
+        latest = conn.execute(text(
+            "SELECT max(week_start_date) FROM sales_history WHERE n_days = 7")).scalar()
+        if latest is None:
+            return None
+        hi = pd.Timestamp(latest)
+        mid = (hi - pd.Timedelta(weeks=window_weeks)).date()
+        lo = (hi - pd.Timedelta(weeks=2 * window_weeks)).date()
+        q = text("SELECT DISTINCT series_id FROM sales_history WHERE n_days = 7 AND units > 0 "
+                 "AND week_start_date > :a AND week_start_date <= :b")
+        recent = {r[0] for r in conn.execute(q, {"a": mid, "b": str(latest)})}
+        prior = {r[0] for r in conn.execute(q, {"a": lo, "b": mid})}
+    return {"window_weeks": window_weeks, "new_series": len(recent - prior),
+            "dead_series": len(prior - recent), "recent_active": len(recent)}
+
+
+def revision_volatility(max_runs=12):
+    """Стабильность прогноза: насколько расходится точечный P50 на одну и ту же неделю ряда
+    между прогонами с разным origin. Среднее по (ряд, неделя) с >=2 origin: разброс P50 к
+    среднему (коэффициент вариации). None, если пересечений origin нет."""
+    sql = text("""
+        SELECT p.series_id, p.week_start_date, p.p50, r.origin
+        FROM forecast_point p
+        JOIN forecast_run r ON r.id = p.run_id AND r.status IN ('completed', 'partial')
+        WHERE p.run_id IN (SELECT id FROM forecast_run
+                           WHERE status IN ('completed', 'partial') ORDER BY id DESC LIMIT :n)
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql_query(sql, conn, params={"n": max_runs})
+    if df.empty:
+        return None
+
+    def cov(g):
+        if g["origin"].nunique() < 2:
+            return np.nan
+        m = g["p50"].mean()
+        return g["p50"].std(ddof=0) / m if m > 0 else np.nan
+
+    vals = df.groupby(["series_id", "week_start_date"]).apply(cov).dropna()
+    return round(float(vals.mean()), 4) if not vals.empty else None
+
+
 def catalog(run_id):
     # ширина интервала суммируется за горизонт (как и P50), чтобы колонки были в одном масштабе
     sql = """SELECT p.series_id, s.item_id, s.dept_id, s.store_id, s.state_id,

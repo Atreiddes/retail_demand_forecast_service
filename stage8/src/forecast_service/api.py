@@ -67,7 +67,9 @@ def _monitoring_report():
     completed = crud.last_run_id(models.COMPLETED)
     res = _drift_cached(completed) if completed else None
     drift = res["features"] if res else None
-    return monitoring.gate(accuracy, drift, breakdowns)
+    health = {"freshness": crud.data_freshness(), "churn": crud.assortment_churn(),
+              "revision_volatility": crud.revision_volatility()}
+    return monitoring.gate(accuracy, drift, breakdowns, health)
 
 
 def _collect_metrics():
@@ -80,6 +82,8 @@ def _collect_metrics():
         prom.set_drift(report["drift"])
     prom.set_accuracy(report["accuracy"])
     prom.set_breakdowns(report["breakdowns"])
+    health = report["health"]
+    prom.set_health(health["freshness"], health["churn"], health["revision_volatility"])
     prom.set_degraded(report)
 
 

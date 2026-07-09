@@ -62,3 +62,24 @@ def test_gate_breakdowns_ok():
           "fva_ma4": {"improvement_pct": 4.0}}
     rep = m.gate(None, None, bd)
     assert rep["ok"]
+
+
+def test_gate_completeness_low():
+    health = {"freshness": {"completeness": 0.7}, "churn": None, "revision_volatility": None}
+    rep = m.gate(None, None, None, health)
+    assert not rep["ok"]
+    assert any("полнота" in w for w in rep["warnings"])
+
+
+def test_gate_revision_high():
+    health = {"freshness": None, "churn": None, "revision_volatility": 0.5}
+    rep = m.gate(None, None, None, health)
+    assert not rep["ok"]
+    assert any("разброс" in w for w in rep["warnings"])
+
+
+def test_gate_health_ok():
+    health = {"freshness": {"completeness": 0.98}, "churn": {"new_series": 1, "dead_series": 0},
+              "revision_volatility": 0.05}
+    rep = m.gate(None, None, None, health)
+    assert rep["ok"]
