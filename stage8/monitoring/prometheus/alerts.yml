@@ -128,3 +128,21 @@ groups:
         annotations:
           summary: "Соединений с Postgres много"
           description: "Больше 80 соединений с Postgres дольше 10 минут - близко к пределу пула."
+
+      - alert: ContainerMemoryHigh
+        expr: max(container_memory_usage_bytes{id=~"/docker/.+"}) > 3.6e9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Контейнер у предела памяти"
+          description: "Память контейнера выше 3.6 ГБ - у воркера лимит 4 ГБ, близко к OOM, пачки начнут падать."
+
+      - alert: DiskAlmostFull
+        expr: max(container_fs_usage_bytes / container_fs_limit_bytes) > 0.9
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Диск почти заполнен"
+          description: "Занятость файловой системы контейнера выше 0.9 - скоро встанет всё."

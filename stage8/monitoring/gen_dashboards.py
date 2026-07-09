@@ -125,6 +125,16 @@ postgres = dash("База Postgres", "postgres", [
     ts(6, "Соединения по базам", [("pg_stat_database_numbackends", "{{datname}}")], gp(12, 4, 12, 8)),
 ])
 
-for name, d in [("forecast-service", service), ("rabbitmq", rabbit), ("postgres", postgres)]:
+# Контейнеры (cAdvisor). На Docker Desktop имена не резолвятся, поэтому по cgroup-id
+containers = dash("Контейнеры", "containers", [
+    stat(1, "Память контейнеров, сумма", [('sum(container_memory_usage_bytes{id=~"/docker/.+"})', None)], gp(0, 0, 8, 4), "bytes"),
+    stat(2, "Макс. занятость файловой системы", [("max(container_fs_usage_bytes / container_fs_limit_bytes)", None)], gp(8, 0, 8, 4), "percentunit"),
+    stat(3, "Контейнеров", [('count(container_last_seen{id=~"/docker/.+"})', None)], gp(16, 0, 8, 4)),
+    ts(4, "Память по контейнерам", [('container_memory_usage_bytes{id=~"/docker/.+"}', "{{id}}")], gp(0, 4, 12, 8), "bytes"),
+    ts(5, "CPU по контейнерам, ядер", [('sum by(id)(rate(container_cpu_usage_seconds_total{id=~"/docker/.+"}[5m]))', "{{id}}")], gp(12, 4, 12, 8)),
+])
+
+for name, d in [("forecast-service", service), ("rabbitmq", rabbit), ("postgres", postgres),
+                ("containers", containers)]:
     (OUT / f"{name}.json").write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     print("написан", name)
