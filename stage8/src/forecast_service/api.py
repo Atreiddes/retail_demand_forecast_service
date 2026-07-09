@@ -242,6 +242,15 @@ def _psi(ref_prop, cur_prop):
     return float(np.sum((c - r) * np.log(c / r)))
 
 
+def _ks(ref, cur):
+    """Двухвыборочная статистика Колмогорова-Смирнова: макс. расстояние между ЭФР выборок."""
+    ref, cur = np.sort(ref), np.sort(cur)
+    grid = np.concatenate([ref, cur])
+    cdf_r = np.searchsorted(ref, grid, side="right") / ref.size
+    cdf_c = np.searchsorted(cur, grid, side="right") / cur.size
+    return float(np.max(np.abs(cdf_r - cdf_c)))
+
+
 @lru_cache(maxsize=256)
 def _drift_cached(run_id: int):
     """PSI признаков: текущее окно против того же окна год назад по тем же рядам.
@@ -266,7 +275,7 @@ def _drift_cached(run_id: int):
         cur_prop = np.histogram(c, bins=edges)[0] / c.size
         p = _psi(ref_prop, cur_prop)
         status = "narrow" if p < 0.1 else ("mid" if p < 0.25 else "wide")
-        out.append({"feature": feat, "psi": round(p, 3), "status": status})
+        out.append({"feature": feat, "psi": round(p, 3), "ks": round(_ks(r, c), 3), "status": status})
     return {"features": out, "window_weeks": crud.DRIFT_WEEKS}
 
 

@@ -30,6 +30,12 @@ def test_gate_drift():
     assert any("дрейф" in w for w in rep["warnings"])
 
 
+def test_gate_drift_ks():
+    rep = m.gate(None, [{"feature": "units", "psi": 0.01, "ks": 0.4}])
+    assert not rep["ok"]
+    assert any("дрейф" in w for w in rep["warnings"])
+
+
 def test_gate_no_data():
     rep = m.gate(None, None)
     assert rep["ok"]

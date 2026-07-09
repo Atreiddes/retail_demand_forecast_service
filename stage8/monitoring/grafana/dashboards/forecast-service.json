@@ -470,7 +470,7 @@
     {
       "id": 10,
       "type": "timeseries",
-      "title": "Дрейф данных PSI по признакам",
+      "title": "Дрейф признаков: PSI и KS",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -491,7 +491,18 @@
           "expr": "forecast_data_drift_psi",
           "instant": false,
           "range": true,
-          "legendFormat": "{{feature}}"
+          "legendFormat": "PSI {{feature}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "forecast_drift_ks",
+          "instant": false,
+          "range": true,
+          "legendFormat": "KS {{feature}}"
         }
       ],
       "fieldConfig": {
