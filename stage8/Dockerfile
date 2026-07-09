@@ -43,6 +43,8 @@ COPY --from=builder /app/artifacts /app/artifacts
 COPY --from=builder /app/data /app/data
 COPY --from=builder /app/metrics /app/metrics
 COPY --from=builder /app/pyproject.toml /app/pyproject.toml
+COPY --from=builder /app/alembic.ini /app/alembic.ini
+COPY --from=builder /app/alembic /app/alembic
 
 USER app
 
