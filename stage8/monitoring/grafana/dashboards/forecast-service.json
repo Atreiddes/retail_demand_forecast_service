@@ -1166,7 +1166,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forecast_last_actual_week{job=\"forecast-api\"}",
+          "expr": "forecast_last_actual_week{job=\"forecast-api\"} * 1000",
           "instant": true,
           "range": false
         }
