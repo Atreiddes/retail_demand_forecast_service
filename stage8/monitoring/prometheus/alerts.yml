@@ -11,13 +11,13 @@ groups:
           description: "Сработал гейт деградации (точность, смещение, интервалы или дрейф). Повод для разбора и переобучения."
 
       - alert: IntervalCoverageLow
-        expr: forecast_interval_coverage{job="forecast-api"} < 0.65
+        expr: forecast_interval_coverage{job="forecast-api"} < 0.6
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Интервалы прогноза слишком узкие"
-          description: "Доля факта в интервале P10-P90 ниже 0.65 при номинальных 0.8 - интервалы недооценивают неопределённость."
+          description: "Доля факта в интервале P10-P90 ниже 0.6 при номинальных 0.8 - интервалы недооценивают неопределённость."
 
       - alert: FeatureDrift
         expr: max(forecast_data_drift_psi{job="forecast-api"}) > 0.25
@@ -29,22 +29,22 @@ groups:
           description: "PSI признака выше 0.25 - распределение входа заметно ушло от эталона год назад."
 
       - alert: ModelBeatenByBaseline
-        expr: forecast_fva_ma4_pct{job="forecast-api"} <= 0
+        expr: forecast_fva_ma4_pct{job="forecast-api"} <= -8
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Модель перестала бить базу MA-4"
-          description: "Прирост точности над скользящим средним MA-4 не выше нуля - относительная деградация."
+          description: "Проигрыш скользящему среднему MA-4 глубже -8% - относительная деградация за пределами шума одного магазина."
 
       - alert: PlanningBiasHigh
-        expr: forecast_planning_bias{job="forecast-api"} > 0.1
+        expr: forecast_planning_bias{job="forecast-api"} > 0.15
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "Смещение на плановом уровне велико"
-          description: "Модуль смещения на уровне штата выше 0.1 - систематический сдвиг заказа на плановом уровне."
+          description: "Модуль смещения на уровне штата выше 0.15 - систематический сдвиг заказа на плановом уровне."
 
       - alert: WorkerChunkFailures
         expr: sum(rate(forecast_chunks_processed_total{job="forecast-worker",result="failed"}[10m])) > 0

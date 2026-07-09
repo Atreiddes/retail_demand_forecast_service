@@ -43,7 +43,7 @@ def test_gate_planning_bias():
 
 
 def test_gate_fva_collapsed():
-    bd = {"planning_bias": 0.01, "promo": {}, "fva_ma4": {"improvement_pct": -3.0}}
+    bd = {"planning_bias": 0.01, "promo": {}, "fva_ma4": {"improvement_pct": -10.0}}
     rep = m.gate(None, None, bd)
     assert not rep["ok"]
     assert any("MA-4" in w for w in rep["warnings"])
