@@ -161,6 +161,30 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Оркестратор переобучения, ops-профиль: docker compose --profile ops up -d airflow
+  # Грузит dags/, петля monitor_and_retrain опрашивает гейт и запускает retrain_artifact.
+  # Не входит в стандартный up, деплоится отдельно в окружении оркестратора.
+  airflow:
+    image: apache/airflow:2.10.4-python3.12
+    profiles: ["ops"]
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+      SERVICE_URL: "http://api:8000"
+      DB_URL: "postgresql+psycopg://postgres:postgres@db:5432/forecast"
+      # лёгкие зависимости для валидации входа; sqlmodel не ставим - он тянет SQLAlchemy 2,
+      # несовместимую с Airflow. Тяжёлое переобучение выполняется в обучающем образе (ops)
+      _PIP_ADDITIONAL_REQUIREMENTS: "pandas numpy<2 pyarrow pandera pydantic-settings"
+    volumes:
+      - .:/opt/airflow/project
+      - ../stage5:/opt/airflow/stage5
+    ports:
+      - "${AIRFLOW_PORT:-8793}:8080"
+    depends_on:
+      - api
+    restart: unless-stopped
+
 volumes:
   pgdata:
   promdata:
