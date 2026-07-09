@@ -118,6 +118,17 @@ services:
       - api
     restart: unless-stopped
 
+  # Alertmanager: принимает алерты от Prometheus и доставляет их (вебхук в api)
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    depends_on:
+      - api
+    restart: unless-stopped
+
   grafana:
     image: grafana/grafana-oss:11.2.0
     environment:

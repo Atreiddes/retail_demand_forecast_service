@@ -285,6 +285,19 @@ def monitoring_report():
     return _monitoring_report()
 
 
+@app.post("/api/alerts")
+async def receive_alerts(request: Request):
+    """Приёмник вебхука Alertmanager: логирует сработавшие алерты. Точка доставки уведомлений;
+    в рабочей системе отсюда рассылают в почту или мессенджер."""
+    payload = await request.json()
+    alerts = payload.get("alerts", [])
+    for a in alerts:
+        name = a.get("labels", {}).get("alertname", "?")
+        summary = a.get("annotations", {}).get("summary", "")
+        print(f"[alert] {a.get('status', '?')} {name}: {summary}", flush=True)
+    return {"received": len(alerts)}
+
+
 @app.get("/api/runs/{run_id}/export.csv")
 def export(run_id: int):
     buf = io.StringIO()

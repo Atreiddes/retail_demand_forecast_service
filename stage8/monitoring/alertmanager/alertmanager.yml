@@ -1,0 +1,13 @@
+route:
+  receiver: service-webhook
+  group_by: ["alertname"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: service-webhook
+    webhook_configs:
+      # доставка уведомлений в сервис; в рабочей системе тут почта или мессенджер
+      - url: http://api:8000/api/alerts
+        send_resolved: true
