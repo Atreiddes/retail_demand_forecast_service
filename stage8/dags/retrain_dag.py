@@ -1,27 +1,43 @@
 """Airflow DAG периодического переобучения артефакта модели.
 
-Продакшн-обёртка над офлайн-пайплайном: приём новых недель -> проверка входных данных
-(pandera) -> переобучение артефакта -> бэктест -> quality gate -> деплой. Если бэктест
-просел выше порога, новый артефакт не выкатывается (алерт, остаётся прежний). Это ловит
-случай, когда переобучение ухудшает качество.
+Приём новых недель -> проверка входа (pandera) -> переобучение -> бэктест -> quality gate ->
+деплой. Если бэктест просел выше порога, новый артефакт не выкатывается (остаётся прежний).
 
-Это ops-компонент, в рантайм сервиса не входит (сервис только применяет готовый артефакт).
-Airflow и apache-airflow ставятся отдельно в окружении оркестратора, в зависимости сервиса
-не входят. Запуск в окружении обучения (lightgbm + пайплайн stage5).
+Тяжёлые шаги (переобучение, бэктест) идут в отдельном контейнере через DockerOperator, а не
+в окружении airflow: обучающий образ несёт lightgbm и пайплайн stage5, изолирован от зависимостей
+airflow. Образ и хост-путь проекта задаются переменными TRAIN_IMAGE и HOST_PROJECT_DIR.
+Это ops-компонент, в рантайм сервиса не входит.
 """
 from __future__ import annotations
 
+import json
 import os
-import subprocess
+import shutil
 import sys
 from pathlib import Path
 
 import pendulum
+from docker.types import Mount
+
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowFailException
+from airflow.providers.docker.operators.docker import DockerOperator
 
-HW8 = Path(__file__).resolve().parent.parent
+PROJECT = Path(__file__).resolve().parent.parent            # каталог проекта внутри airflow
+HOST_PROJECT = os.getenv("HOST_PROJECT_DIR", str(PROJECT))  # тот же каталог на хосте для sibling-контейнеров
+TRAIN_IMAGE = os.getenv("TRAIN_IMAGE", "stage8-api")        # образ с обучающим пайплайном
+NETWORK = os.getenv("COMPOSE_NETWORK", "stage8_default")
 WRMSSE_GATE = 0.75  # порог: если бэктест хуже, артефакт не деплоим
+
+
+def _train_step(task_id, command):
+    """Шаг обучения в отдельном контейнере: изоляция тяжёлых зависимостей от окружения airflow."""
+    return DockerOperator(
+        task_id=task_id, image=TRAIN_IMAGE, command=command, working_dir="/app",
+        environment={"ARTIFACT_DIR": "/app/artifacts_staging", "PYTHONPATH": "/app/src"},
+        mounts=[Mount(source=HOST_PROJECT, target="/app", type="bind")],
+        network_mode=NETWORK, docker_url="unix://var/run/docker.sock",
+        auto_remove="success", mount_tmp_dir=False)
 
 
 @dag(
@@ -36,7 +52,7 @@ def retrain_artifact():
         """Контракт входных данных: типы, границы, допустимые категории (pandera)."""
         import pandas as pd
 
-        sys.path.insert(0, str(HW8 / "src"))
+        sys.path.insert(0, str(PROJECT / "src"))
         from forecast_service.config import settings
         from forecast_service.ml.schemas import validate_sample, weekly_input_schema
 
@@ -44,28 +60,14 @@ def retrain_artifact():
         validate_sample(df, weekly_input_schema)  # падает при нарушении контракта
         return int(len(df))
 
-    @task
-    def rebuild() -> None:
-        """Пересборка артефакта на свежих данных в staging-каталог: рабочий artifacts
-        не трогаем, пока новая модель не пройдёт порог качества."""
-        env = {**os.environ, "ARTIFACT_DIR": str(HW8 / "artifacts_staging")}
-        subprocess.run([sys.executable, "scripts/train_artifact.py"], cwd=HW8, check=True, env=env)
-
-    @task
-    def backtest() -> None:
-        """Walk-forward бэктест пайплайна (метрики для UI) и оценка именно staging-артефакта
-        на последнем окне (metrics/artifact_eval.json) - порог качества проверяет тот файл
-        модели, который поедет в развёртывание."""
-        env = {**os.environ, "ARTIFACT_DIR": str(HW8 / "artifacts_staging")}
-        subprocess.run([sys.executable, "scripts/foods_metrics.py"], cwd=HW8, check=True)
-        subprocess.run([sys.executable, "scripts/artifact_eval.py"], cwd=HW8, check=True, env=env)
+    rebuild = _train_step("rebuild", "python scripts/train_artifact.py")
+    backtest = _train_step(
+        "backtest", ["sh", "-c", "python scripts/foods_metrics.py && python scripts/artifact_eval.py"])
 
     @task
     def quality_gate() -> float:
         """Не выкатываем артефакт, если его оценка на последнем окне хуже порога."""
-        import json
-
-        res = json.loads((HW8 / "metrics" / "artifact_eval.json").read_text(encoding="utf-8"))
+        res = json.loads((PROJECT / "metrics" / "artifact_eval.json").read_text(encoding="utf-8"))
         wrmsse = float(res["wrmsse12"])
         if wrmsse > WRMSSE_GATE:
             raise AirflowFailException(
@@ -74,21 +76,16 @@ def retrain_artifact():
 
     @task
     def deploy(wrmsse: float) -> None:
-        """Промоушен: staging-артефакт копируется в рабочий ./artifacts. Каталог
-        примонтирован в контейнеры, воркеры перечитывают модель по времени изменения
-        файла - выкатка доезжает до рантайма без пересборки образа."""
-        import shutil
-
-        src, dst = HW8 / "artifacts_staging", HW8 / "artifacts"
+        """Промоушен: staging-артефакт копируется в рабочий ./artifacts, воркеры перечитывают
+        модель по времени изменения файла - выкатка доезжает до рантайма без пересборки образа."""
+        src, dst = PROJECT / "artifacts_staging", PROJECT / "artifacts"
         for f in src.iterdir():
             shutil.copy2(f, dst / f.name)
         print(f"артефакт прошёл порог качества (WRMSSE={wrmsse:.4f}) и выложен в {dst}", flush=True)
 
     checked = validate_input()
-    rebuilt = rebuild()
-    tested = backtest()
     gate = quality_gate()
-    checked >> rebuilt >> tested >> gate
+    checked >> rebuild >> backtest >> gate
     deploy(gate)
 
 
