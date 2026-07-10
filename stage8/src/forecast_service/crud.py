@@ -209,7 +209,7 @@ def recent_runs(limit=15):
                  "status": r.status, "created_at": str(r.created_at)[:19]} for r in runs]
 
 
-def run_status_counts():
+def run_status_counts() -> dict:
     """Число прогонов в каждом статусе, для гейджей мониторинга."""
     with Session(engine) as s:
         rows = s.exec(select(models.ForecastRun.status, func.count())
@@ -217,7 +217,7 @@ def run_status_counts():
     return {status: n for status, n in rows}
 
 
-def last_run_id(status):
+def last_run_id(status: str) -> int | None:
     """id последнего прогона в заданном статусе, иначе None."""
     with Session(engine) as s:
         return s.exec(select(models.ForecastRun.id)
@@ -225,7 +225,7 @@ def last_run_id(status):
                       .order_by(models.ForecastRun.id.desc()).limit(1)).first()
 
 
-def last_matured_run_id():
+def last_matured_run_id() -> int | None:
     """id последнего завершённого прогона, у которого хотя бы часть недель уже имеет факт.
     Прогноз в будущее факта ещё не имеет, поэтому точность и разрезы считаем по нему, а не по
     просто последнему завершённому. None, если факта нет ни по одному прогону."""
@@ -242,7 +242,7 @@ def last_matured_run_id():
     return row[0] if row else None
 
 
-def accuracy_vs_actual(run_id):
+def accuracy_vs_actual(run_id: int) -> dict | None:
     """Точность прогноза против пришедшего факта: WMAPE, смещение и покрытие интервала
     P10-P90 по тем неделям прогона, для которых уже есть полная неделя факта. None, если
     факта ещё нет (прогноз в будущее). Сравнивается точечный P50 с фактическими продажами."""
@@ -265,7 +265,7 @@ def accuracy_vs_actual(run_id):
     return {"n_points": int(len(df)), "wmape": wmape, "bias": bias, "coverage": coverage}
 
 
-def _wmape_bias(g):
+def _wmape_bias(g) -> dict | None:
     """WMAPE, смещение и покрытие интервала по группе точек прогноз-факт. None при нулевом факте."""
     total = float(g["units"].sum())
     if total <= 0:
@@ -277,7 +277,7 @@ def _wmape_bias(g):
             "bias": round(float((p50 - act).sum() / total), 4), "coverage": round(cov, 4)}
 
 
-def accuracy_breakdowns(run_id):
+def accuracy_breakdowns(run_id: int) -> dict | None:
     """Разрезы точности прогноз-факт для мониторинга деградации по прогону: по горизонту,
     по штату (плановый уровень), промо против базовых недель, сегментам движения и cold-start,
     плюс forecast value add против базы MA-4. None, если факта по прогону ещё нет.
@@ -357,7 +357,7 @@ def accuracy_breakdowns(run_id):
     }
 
 
-def data_freshness():
+def data_freshness() -> dict | None:
     """Свежесть факта: последняя полная неделя, глубина истории и полнота последней недели -
     доля недавно активных рядов, у которых уже есть факт за последнюю неделю. Низкая полнота -
     признак неполной или запоздавшей загрузки данных. None, если истории нет."""
@@ -380,7 +380,7 @@ def data_freshness():
             "history_weeks": int(weeks), "completeness": completeness}
 
 
-def assortment_churn(window_weeks=13):
+def assortment_churn(window_weeks: int = 13) -> dict | None:
     """Дрейф ассортимента: новые и выбывшие ряды. Активный ряд - с продажами (units>0).
     Последнее окно window_weeks против предыдущего такого же. None, если истории нет."""
     with engine.connect() as conn:
@@ -399,7 +399,7 @@ def assortment_churn(window_weeks=13):
             "dead_series": len(prior - recent), "recent_active": len(recent)}
 
 
-def run_coverage(run_id):
+def run_coverage(run_id: int) -> float | None:
     """Полнота прогона: доля запрошенных рядов, для которых есть прогноз. Ниже 1 - часть рядов
     выпала (провал пачки, пустая история). None, если прогон не найден или пуст."""
     with Session(engine) as s:
@@ -413,7 +413,7 @@ def run_coverage(run_id):
     return round(got / run.n_series, 4)
 
 
-def revision_volatility(max_runs=12):
+def revision_volatility(max_runs: int = 12) -> float | None:
     """Стабильность прогноза: насколько расходится точечный P50 на одну и ту же неделю ряда
     между прогонами с разным origin. Среднее по (ряд, неделя) с >=2 origin: разброс P50 к
     среднему (коэффициент вариации). None, если пересечений origin нет."""
