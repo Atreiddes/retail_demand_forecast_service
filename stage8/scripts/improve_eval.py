@@ -88,7 +88,8 @@ def main():
     out = {"n_folds": len(folds), "horizon": int(U.HORIZON), "step": int(RC.STEP),
            "new_cols": NEWCOLS}
     for name, rows in res.items():
-        a12 = np.array([r["wr12"] for r in rows]); a9 = np.array([r["wr9"] for r in rows])
+        a12 = np.array([r["wr12"] for r in rows])
+        a9 = np.array([r["wr9"] for r in rows])
         aL12 = np.array([r["L12"] for r in rows])
         out[name] = {"wr12_mean": round(float(a12.mean()), 4), "wr12_std": round(float(a12.std()), 4),
                      "wr9_mean": round(float(a9.mean()), 4), "wr9_std": round(float(a9.std()), 4),

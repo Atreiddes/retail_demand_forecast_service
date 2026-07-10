@@ -91,7 +91,8 @@ def main():
     out = {"n_eval_folds": len(eval_folds), "step": int(RC.STEP), "n_trials": int(RC.N_TRIALS),
            "new_cols": NEWCOLS, "best_params": {k: v for k, v in best.items()}}
     for name, rows in res.items():
-        a12 = np.array([r["wr12"] for r in rows]); a9 = np.array([r["wr9"] for r in rows])
+        a12 = np.array([r["wr12"] for r in rows])
+        a9 = np.array([r["wr9"] for r in rows])
         aL12 = np.array([r["L12"] for r in rows])
         out[name] = {"wr12_mean": round(float(a12.mean()), 4), "wr12_std": round(float(a12.std()), 4),
                      "wr9_mean": round(float(a9.mean()), 4), "wr9_std": round(float(a9.std()), 4),
