@@ -89,4 +89,12 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+
+    p = argparse.ArgumentParser(description="Сборка артефакта модели в каталог")
+    p.add_argument("--artifact-dir", default=os.environ.get("ARTIFACT_DIR"),
+                   help="каталог сборки (по умолчанию ARTIFACT_DIR или ./artifacts)")
+    args = p.parse_args()
+    if args.artifact_dir:
+        ART = Path(args.artifact_dir)
     main()

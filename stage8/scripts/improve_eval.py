@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -22,9 +23,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT.parent / "stage5" / "scripts"))
 # непересекающиеся окна по умолчанию (шаг = горизонт): run_cv читает env на импорте,
-# поэтому дефолты ставим до него, чтобы протокол совпал с докстрингом без ручного env
-os.environ.setdefault("STEP", "8")
-os.environ.setdefault("N_FOLDS", "4")
+# поэтому параметры разбираем и кладём в окружение до него
+_p = argparse.ArgumentParser(description="Сравнение признаков OLD vs NEW на walk-forward")
+_p.add_argument("--step", default=os.environ.get("STEP", "8"), help="шаг walk-forward (= горизонту)")
+_p.add_argument("--n-folds", default=os.environ.get("N_FOLDS", "4"), help="число непересекающихся окон")
+_a, _ = _p.parse_known_args()
+os.environ["STEP"], os.environ["N_FOLDS"] = str(_a.step), str(_a.n_folds)
 import features_direct as FD  # noqa: E402
 import metrics as M  # noqa: E402
 import model_lgb as LGB  # noqa: E402
