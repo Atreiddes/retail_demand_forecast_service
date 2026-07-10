@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import time
-import traceback
 
-from . import crud, mq, prom
+from . import crud, log, mq, prom
 from .forecast import forecast_series, load_artifact
 
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+_log = logging.getLogger("forecast.worker")
 
 
 def handle(body):
@@ -31,19 +32,20 @@ def handle(body):
         prom.CHUNKS_PROCESSED.labels(result="completed").inc()
         prom.SERIES_FORECAST.inc(out["series_id"].nunique())
         prom.FALLBACK.inc(out.attrs.get("n_fallback", 0))
-        print(f"chunk {msg['chunk_id']} готов: {out['series_id'].nunique()} рядов", flush=True)
+        _log.info("chunk %s готов: %s рядов", msg["chunk_id"], out["series_id"].nunique())
     except Exception as e:
         prom.CHUNKS_PROCESSED.labels(result="failed").inc()
         crud.fail_chunk(msg["chunk_id"], e, WORKER_ID)
         crud.finalize_run(msg["run_id"])  # если это была последняя пачка, сразу закрыть прогон в PARTIAL
-        print(f"chunk {msg['chunk_id']} ошибка: {e}\n{traceback.format_exc()}", flush=True)
+        _log.exception("chunk %s ошибка", msg["chunk_id"])
         raise
 
 
 def main():
+    log.setup()
     load_artifact()
     prom.serve()  # сервер метрик воркера для скрейпа Prometheus
-    print(f"воркер {WORKER_ID} готов", flush=True)
+    _log.info("воркер %s готов", WORKER_ID)
     mq.consume(handle)
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from datetime import date
@@ -24,12 +25,13 @@ from fastapi.templating import Jinja2Templates
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
-from . import crud, models, monitoring, mq, prom
+from . import crud, log, models, monitoring, mq, prom
 from .config import settings
 from .db import create_db
 from .forecast import load_artifact
 from .ml.features import HMAX
 
+_log = logging.getLogger("forecast.api")
 HERE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
 
@@ -42,9 +44,9 @@ async def _reap_stale():
         try:
             n = await asyncio.to_thread(crud.fail_stale_chunks)
             if n:
-                print(f"закрыто зависших пачек: {n}", flush=True)
-        except Exception as e:
-            print("проверка зависших пачек:", e, flush=True)
+                _log.info("закрыто зависших пачек: %s", n)
+        except Exception:
+            _log.exception("проверка зависших пачек")
 
 
 async def _refresh_metrics():
@@ -53,8 +55,8 @@ async def _refresh_metrics():
     while True:
         try:
             await asyncio.to_thread(_collect_metrics)
-        except Exception as e:
-            print("сбор метрик:", e, flush=True)
+        except Exception:
+            _log.exception("сбор метрик")
         await asyncio.sleep(15)
 
 
@@ -104,12 +106,13 @@ def _collect_metrics():
 
 @asynccontextmanager
 async def lifespan(app):
+    log.setup()
     create_db()
     try:
         art = load_artifact()
         prom.set_model_version(art["model_version"])
     except Exception as e:
-        print("артефакт не загружен:", e, flush=True)
+        _log.warning("артефакт не загружен: %s", e)
     crud.reconcile()
     reaper = asyncio.create_task(_reap_stale())
     collector = asyncio.create_task(_refresh_metrics())
@@ -319,7 +322,7 @@ async def receive_alerts(request: Request):
     for a in alerts:
         name = a.get("labels", {}).get("alertname", "?")
         summary = a.get("annotations", {}).get("summary", "")
-        print(f"[alert] {a.get('status', '?')} {name}: {summary}", flush=True)
+        _log.info("алерт %s %s: %s", a.get("status", "?"), name, summary)
     return {"received": len(alerts)}
 
 

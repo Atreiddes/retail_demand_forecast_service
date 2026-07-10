@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import io
+import logging
 
 import pandas as pd
 from sqlmodel import Session, select
 
-from . import models
+from . import log, models
 from .config import settings
 from .db import create_db, engine
 from .ml.schemas import validate_sample, weekly_input_schema
+
+_log = logging.getLogger("forecast.seed")
 
 SERIES_COLS = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
 HIST_COLS = ["series_id", "week_start_date", "units", "revenue", "sell_price",
@@ -34,10 +37,11 @@ def _copy_all(tables):
 
 
 def main():
+    log.setup()
     create_db()
     with Session(engine) as s:
         if s.exec(select(models.Series).limit(1)).first():
-            print("база уже наполнена, пропускаю")
+            _log.info("база уже наполнена, пропускаю")
             return
 
     df = pd.read_parquet(settings.data_path)
@@ -45,7 +49,7 @@ def main():
     series = df[SERIES_COLS].drop_duplicates("id")
     hist = df.rename(columns={"id": "series_id"})[HIST_COLS]
     _copy_all([(series, "series", SERIES_COLS), (hist, "sales_history", HIST_COLS)])
-    print(f"загружено: {len(series):,} рядов, {len(hist):,} строк истории")
+    _log.info("загружено: %s рядов, %s строк истории", f"{len(series):,}", f"{len(hist):,}")
 
 
 if __name__ == "__main__":
